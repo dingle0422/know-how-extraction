@@ -1,11 +1,12 @@
 import pandas as pd
 import json
 import os
+import time
 # 将项目根目录添加到sys.path，确保项目内部模块可被正确导入
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 from llm.llm_engine import qwen
-from sketch.prompt.domain_infer import domain_infer_v0, domain_infer_v1
+from domain_infer_sketch.prompt.domain_infer import domain_infer_v0, domain_infer_v1
 import json5
 from tqdm import tqdm
 
@@ -21,7 +22,7 @@ def parse_name_level_map(file_path: str) -> dict:
         }
         同一层级内名称不重复，以首次出现的 desc 为准。
     """
-    df = pd.read_csv(file_path, header=0, encoding='utf-8')
+    df = pd.read_csv(file_path, header=0, encoding='gbk')
     df = df.dropna(axis=1, how='all')
     num_levels = len(df.columns) // 2
 
@@ -64,7 +65,7 @@ def parse_ancestry_map(file_path: str) -> dict:
         所有层级的节点均包含在内，链中包含节点自身。
         同名节点跨层级出现时，保留最深（最完整）的链。
     """
-    df = pd.read_csv(file_path, header=0, encoding='utf-8')
+    df = pd.read_csv(file_path, header=0, encoding='gbk')
     df = df.dropna(axis=1, how='all')
     num_levels = len(df.columns) // 2
 
@@ -129,7 +130,7 @@ def parse_descendant_map(file_path: str) -> dict:
         每个 levelN 下列出该层级的所有节点，值为其完整子树。
         同名节点在不同层级各自独立，子树不会因同名而被合并为空。
     """
-    df = pd.read_csv(file_path, header=0, encoding='utf-8')
+    df = pd.read_csv(file_path, header=0, encoding='gbk')
     df = df.dropna(axis=1, how='all')
     num_levels = len(df.columns) // 2
 
@@ -251,24 +252,26 @@ def domain_infer(input_, domain_name, domain_level, domain_desc):
     return res
 
 if __name__ == "__main__":
+    DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
     # 解析level数据
-    FILE = "sketch/data/levels.csv"
+    FILE = os.path.join(DATA_DIR, "levels_0316.csv")
     name_level = parse_name_level_map(FILE)
     ancestry = parse_ancestry_map(FILE)
     descendant = parse_descendant_map(FILE)
 
-    with open("sketch/data/name_level_map.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "name_level_map.json"), "w", encoding="utf-8") as f:
         json.dump(name_level, f, ensure_ascii=False, indent=2)
 
-    with open("sketch/data/ancestry_map.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "ancestry_map.json"), "w", encoding="utf-8") as f:
         json.dump(ancestry, f, ensure_ascii=False, indent=2)
 
-    with open("sketch/data/descendant_map.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "descendant_map.json"), "w", encoding="utf-8") as f:
         json.dump(descendant, f, ensure_ascii=False, indent=2)
 
 
     # 读取待推理数据data.csv，其中‘问题’列为input，‘经济活动’列为label
-    df = pd.read_csv("sketch/data/data.csv", encoding="utf-8").dropna(how="all")
+    df = pd.read_csv(os.path.join(DATA_DIR, "data.csv"), encoding="utf-8").dropna(how="all")
     print("数据总量:", df.shape)
 
     result = level_traceback(df, ancestry, level="经济活动", name_level=name_level)
@@ -286,45 +289,62 @@ if __name__ == "__main__":
     # }
     infer_result = {
         "level1":[],
-        "level2":[],
-        "level3":[],
+        # "level2":[],
+        # "level3":[],
     }
+
+    MAX_RETRIES = 5
+    RETRY_DELAY = 5  # 秒
 
     # 循环对每个问题进行逐层推理，并判断是否属于制定的业务事项
     for index, row in tqdm(df_copy.iterrows()): # 遍历每个问题
-        input_ = row["问题"] 
+        input_ = row["问题"]
         fine_level_label = row['经济活动'] #最细粒度层级的业务事项标签
-        upsteam_set = set()
-        for l in range(len(name_level)): # 遍历每个层级
-            level_number = l+1
-            domain_level = f"level{level_number}"
-            for n in range(len(name_level[domain_level])): # 遍历每个业务事项
-                domain_name = name_level[domain_level][n]["name"] # 获取业务事项名称
-                domain_desc = name_level[domain_level][n]["desc"] # 获取业务事项描述
-                domain_descendant = descendant[domain_level][domain_name] # 获取业务事项的子事项（血缘关系）
-                # 查看上一级业务事项是否被上次论识别为true
-                if domain_level != "level1":
-                    upstream_domain = ancestry[domain_name][f"level{level_number-1}"]
-                    if upstream_domain not in upsteam_set:
-                        continue
-                # 大模型推理
-                judgement = domain_infer(input_, domain_name, domain_descendant, domain_desc)
-                res_content = json5.loads(judgement['content'])
-                judgement = res_content['judgement']
-                reasoning = res_content['reasoning']
-                # 仿照预设的infer_result格式，将每个问题在每个层级下的正确标签和LLM推理出的多个结果添加到infer_result中
-                infer_result[domain_level].append({
-                    "question_id": index,
-                    "question": input_,
-                    "label": fine_level_label,
-                    "target": domain_name,
-                    "judgement": judgement,
-                    "reasoning": reasoning
-                })
-                if judgement:
-                    upsteam_set.add(domain_name)
 
-                #  更新写入json文件
-                with open("sketch/data/infer_result.json", "w", encoding="utf-8") as f:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                upsteam_set = set()
+                question_results = {level: [] for level in infer_result}  # 本题临时结果，失败时不污染 infer_result
+
+                for l in range(len(name_level)): # 遍历每个层级
+                    level_number = l+1
+                    domain_level = f"level{level_number}"
+                    for n in range(len(name_level[domain_level])): # 遍历每个业务事项
+                        domain_name = name_level[domain_level][n]["name"] # 获取业务事项名称
+                        domain_desc = name_level[domain_level][n]["desc"] # 获取业务事项描述
+                        domain_descendant = descendant[domain_level][domain_name] # 获取业务事项的子事项（血缘关系）
+                        # 查看上一级业务事项是否被上次识别为true
+                        if domain_level != "level1":
+                            upstream_domain = ancestry[domain_name][f"level{level_number-1}"]
+                            if upstream_domain not in upsteam_set:
+                                continue
+                        # 大模型推理
+                        judgement = domain_infer(input_, domain_name, domain_descendant, domain_desc)
+                        res_content = json5.loads(judgement['content'])
+                        judgement = res_content['judgement']
+                        reasoning = res_content['reasoning']
+                        question_results[domain_level].append({
+                            "question_id": index,
+                            "question": input_,
+                            "label": fine_level_label,
+                            "target": domain_name,
+                            "judgement": judgement,
+                            "reasoning": reasoning
+                        })
+                        if judgement:
+                            upsteam_set.add(domain_name)
+
+                # 本题全部层级推理成功，合并到总结果并持久化
+                for level in infer_result:
+                    infer_result[level].extend(question_results[level])
+                with open(os.path.join(DATA_DIR, "infer_result.json"), "w", encoding="utf-8") as f:
                     json.dump(infer_result, f, ensure_ascii=False, indent=2)
+                break  # 成功，退出重试循环
+
+            except Exception as e:
+                print(f"\n[question_id={index}] 第 {attempt}/{MAX_RETRIES} 次尝试失败：{e}")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print(f"[question_id={index}] 已达最大重试次数，跳过该问题。")
 

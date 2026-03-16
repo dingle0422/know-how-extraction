@@ -36,7 +36,7 @@ def retry(max_retries: int = 5, sleep_seconds: float = 15.0):
 def qwen(prompt, web_search: bool = False, enable_thinking: bool = False):
     client = OpenAI(
         # 从环境变量读取，或直接填写 api_key="sk-xxx"
-        api_key=os.getenv("QWEN_API_KEY"),
+        api_key=os.getenv("QWEN_API_KEY","sk-fb07e345e2b04562ad5acf2d4bfee8fa"),
         # 北京地域（默认）
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
 
