@@ -2,6 +2,8 @@ import pandas as pd
 import json
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 # 将项目根目录添加到sys.path，确保项目内部模块可被正确导入
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
@@ -191,7 +193,7 @@ def level_traceback(data: pd.DataFrame, ancestry: dict, level: str,
         data:       原始 DataFrame
         ancestry:   parse_ancestry_map 返回的祖先映射
                     {"采购货物": {"level1": "生命周期", "level2": "采购"}, ...}
-        level:      DataFrame 中作为查找键的列名，如 "经济活动"
+        level:      DataFrame 中作为查找键的列名，如 "经济活动"；为空（None/空串）或列不存在时直接返回副本
         name_level: parse_name_level_map 返回的层级映射（可选），
                     提供时为每个层级额外追加 levelN_desc 列
 
@@ -200,6 +202,13 @@ def level_traceback(data: pd.DataFrame, ancestry: dict, level: str,
         例如 level="经济活动"，某行值为"采购货物"，则新增：
             level1_label="生命周期", level2_label="采购", level3_label="采购货物"
     """
+    df = data.copy()
+    # 兼容 level 为空或列不存在：直接返回副本，不追加层级列
+    if level is None or (isinstance(level, str) and not level.strip()):
+        return df
+    if level not in df.columns:
+        return df
+
     # 构建 name -> desc 的扁平查找表（仅在 name_level 不为空时使用）
     desc_lookup = {}
     if name_level:
@@ -220,7 +229,6 @@ def level_traceback(data: pd.DataFrame, ancestry: dict, level: str,
             self_level = 1
         return {**ancestors, f'level{self_level}': name}
 
-    df = data.copy()
     chains = df[level].map(build_chain)
 
     # 收集全部出现的层级 key，按层级号排序
@@ -255,7 +263,7 @@ if __name__ == "__main__":
     DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
     # 解析level数据
-    FILE = os.path.join(DATA_DIR, "levels_0316.csv")
+    FILE = os.path.join(DATA_DIR, "levels_0317_zqrz.csv")
     name_level = parse_name_level_map(FILE)
     ancestry = parse_ancestry_map(FILE)
     descendant = parse_descendant_map(FILE)
@@ -271,15 +279,15 @@ if __name__ == "__main__":
 
 
     # 读取待推理数据data.csv，其中‘问题’列为input，‘经济活动’列为label
-    df = pd.read_csv(os.path.join(DATA_DIR, "data.csv"), encoding="utf-8").dropna(how="all")
+    df = pd.read_csv(os.path.join(DATA_DIR, "data_0317_zqrz.csv"), encoding="utf-8").dropna(how="all")
     print("数据总量:", df.shape)
 
-    result = level_traceback(df, ancestry, level="经济活动", name_level=name_level)
+    result = level_traceback(df, ancestry, level="", name_level=name_level)
     label_cols = [c for c in result.columns if c.endswith("_label") or c.endswith("_desc")]
     preview = result[["问题"] + label_cols].head(3).to_dict(orient="records")
 
     # 创建结果表，记录每个问题的逐层推理结果
-    df_copy = df[["问题", "经济活动"]].copy(deep=True)
+    df_copy = df[["问题"]].copy(deep=True)
     # infer_result = {
     #     "level1":[
     #         {"question": "问题", "label": "经济活动标签", "target": "业务事项名称", "judgements": "业务事项名称判断结果", "reasoning": "业务事项名称判断思考"}
@@ -295,50 +303,67 @@ if __name__ == "__main__":
 
     MAX_RETRIES = 5
     RETRY_DELAY = 5  # 秒
+    MAX_WORKERS = 8  # 每层级并发推理的线程数，可按需调整
+    json_write_lock = threading.Lock()
+
+    def _infer_one(question_text, task_tuple):
+        """单条推理：用于线程池。返回 (n, domain_name, judgement, reasoning)。"""
+        n, domain_name, domain_desc, domain_descendant = task_tuple
+        judgement_res = domain_infer(question_text, domain_name, domain_descendant, domain_desc)
+        res_content = json5.loads(judgement_res["content"])
+        return (n, domain_name, res_content["judgement"], res_content["reasoning"])
 
     # 循环对每个问题进行逐层推理，并判断是否属于制定的业务事项
-    for index, row in tqdm(df_copy.iterrows()): # 遍历每个问题
+    for index, row in tqdm(df_copy.iterrows()):  # 遍历每个问题
         input_ = row["问题"]
-        fine_level_label = row['经济活动'] #最细粒度层级的业务事项标签
+        fine_level_label = ""#row["事项"]  # 最细粒度层级的业务事项标签
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 upsteam_set = set()
                 question_results = {level: [] for level in infer_result}  # 本题临时结果，失败时不污染 infer_result
 
-                for l in range(len(name_level)): # 遍历每个层级
-                    level_number = l+1
+                for l in range(len(name_level)):  # 遍历每个层级
+                    level_number = l + 1
                     domain_level = f"level{level_number}"
-                    for n in range(len(name_level[domain_level])): # 遍历每个业务事项
-                        domain_name = name_level[domain_level][n]["name"] # 获取业务事项名称
-                        domain_desc = name_level[domain_level][n]["desc"] # 获取业务事项描述
-                        domain_descendant = descendant[domain_level][domain_name] # 获取业务事项的子事项（血缘关系）
-                        # 查看上一级业务事项是否被上次识别为true
+                    # 收集本层级需推理的 (n, domain_name, domain_desc, domain_descendant)
+                    tasks = []
+                    for n in range(len(name_level[domain_level])):
+                        domain_name = name_level[domain_level][n]["name"]
+                        domain_desc = name_level[domain_level][n]["desc"]
+                        domain_descendant = descendant[domain_level][domain_name]
                         if domain_level != "level1":
                             upstream_domain = ancestry[domain_name][f"level{level_number-1}"]
                             if upstream_domain not in upsteam_set:
                                 continue
-                        # 大模型推理
-                        judgement = domain_infer(input_, domain_name, domain_descendant, domain_desc)
-                        res_content = json5.loads(judgement['content'])
-                        judgement = res_content['judgement']
-                        reasoning = res_content['reasoning']
+                        tasks.append((n, domain_name, domain_desc, domain_descendant))
+
+                    # 本层级多线程并发推理
+                    level_results = []
+                    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                        futures = [executor.submit(_infer_one, input_, t) for t in tasks]
+                        for future in as_completed(futures):
+                            level_results.append(future.result())
+                    level_results.sort(key=lambda x: x[0])  # 按 n 排序，保证顺序一致
+
+                    for _, domain_name, judgement, reasoning in level_results:
                         question_results[domain_level].append({
                             "question_id": index,
                             "question": input_,
                             "label": fine_level_label,
                             "target": domain_name,
                             "judgement": judgement,
-                            "reasoning": reasoning
+                            "reasoning": reasoning,
                         })
                         if judgement:
                             upsteam_set.add(domain_name)
 
-                # 本题全部层级推理成功，合并到总结果并持久化
-                for level in infer_result:
-                    infer_result[level].extend(question_results[level])
-                with open(os.path.join(DATA_DIR, "infer_result.json"), "w", encoding="utf-8") as f:
-                    json.dump(infer_result, f, ensure_ascii=False, indent=2)
+                # 本题全部层级推理成功，加锁合并到总结果并持久化
+                with json_write_lock:
+                    for level in infer_result:
+                        infer_result[level].extend(question_results[level])
+                    with open(os.path.join(DATA_DIR, "infer_result.json"), "w", encoding="utf-8") as f:
+                        json.dump(infer_result, f, ensure_ascii=False, indent=2)
                 break  # 成功，退出重试循环
 
             except Exception as e:
