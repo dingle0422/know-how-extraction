@@ -263,7 +263,7 @@ if __name__ == "__main__":
     DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
     # 解析level数据
-    FILE = os.path.join(DATA_DIR, "levels_0317_zqrz.csv")
+    FILE = os.path.join(DATA_DIR, "levels_0318_jdyw.csv")
     name_level = parse_name_level_map(FILE)
     ancestry = parse_ancestry_map(FILE)
     descendant = parse_descendant_map(FILE)
