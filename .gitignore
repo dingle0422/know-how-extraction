@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment & secrets
+.env
+*.env.local
+
+# Data files (too large for git)
+*.xlsx
+*.xls
+*.csv
+
+# Intermediate JSON artifacts (regenerable)
+kh_results_*.json
+kh_compression_*.json
+kh_merge_progress_*.json
+kh_final_*.json
+infer_*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

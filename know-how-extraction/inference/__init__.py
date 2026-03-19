@@ -1,0 +1,1 @@
+from .mapreduce_infer import run_mapreduce_inference

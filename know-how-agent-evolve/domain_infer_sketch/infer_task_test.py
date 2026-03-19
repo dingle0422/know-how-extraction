@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 将项目根目录添加到sys.path，确保项目内部模块可被正确导入
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
-from llm.llm_engine import qwen
+from llm.llm_engine import qwen, chat
 from domain_infer_sketch.prompt.domain_infer import domain_infer_v0, domain_infer_v1
 import json5
 from tqdm import tqdm
@@ -256,14 +256,14 @@ def domain_infer(input_, domain_name, domain_level, domain_desc):
         domain_desc: str | 业务事项描述
     """
     prompt = domain_infer_v1(input_=input_, domain_name=domain_name, domain_level=domain_level, domain_desc=domain_desc)
-    res = qwen(prompt)
+    res = chat(prompt)
     return res
 
 if __name__ == "__main__":
     DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
     # 解析level数据
-    FILE = os.path.join(DATA_DIR, "levels_0318_jdyw.csv")
+    FILE = "/root/know-how/know-how-extraction/know-how-agent-evolve/domain_infer_sketch/data/levels_0318_jdyw.csv" # os.path.join(DATA_DIR, "levels_0318_jdyw.csv")
     name_level = parse_name_level_map(FILE)
     ancestry = parse_ancestry_map(FILE)
     descendant = parse_descendant_map(FILE)
@@ -279,7 +279,9 @@ if __name__ == "__main__":
 
 
     # 读取待推理数据data.csv，其中‘问题’列为input，‘经济活动’列为label
-    df = pd.read_csv(os.path.join(DATA_DIR, "data_0317_zqrz.csv"), encoding="utf-8").dropna(how="all")
+    # df = pd.read_csv(os.path.join(DATA_DIR, "data_0317_zqrz.csv"), encoding="utf-8").dropna(how="all")
+    df = pd.read_excel("/root/know-how/know-how-extraction/know-how-agent-evolve/domain_infer_sketch/data/keywords_jdyw_data.xlsx",engine='openpyxl').dropna(how="all")
+    df.rename(columns={"原问题":"问题"}, inplace = True)
     print("数据总量:", df.shape)
 
     result = level_traceback(df, ancestry, level="", name_level=name_level)
@@ -301,9 +303,9 @@ if __name__ == "__main__":
         # "level3":[],
     }
 
-    MAX_RETRIES = 5
+    MAX_RETRIES = 999
     RETRY_DELAY = 5  # 秒
-    MAX_WORKERS = 8  # 每层级并发推理的线程数，可按需调整
+    MAX_WORKERS = 1  # 每层级并发推理的线程数，可按需调整
     json_write_lock = threading.Lock()
 
     def _infer_one(question_text, task_tuple):
@@ -313,39 +315,113 @@ if __name__ == "__main__":
         res_content = json5.loads(judgement_res["content"])
         return (n, domain_name, res_content["judgement"], res_content["reasoning"])
 
-    # 循环对每个问题进行逐层推理，并判断是否属于制定的业务事项
-    for index, row in tqdm(df_copy.iterrows()):  # 遍历每个问题
+#     # 循环对每个问题进行逐层推理，并判断是否属于制定的业务事项
+#     for index, row in tqdm(df_copy.iterrows()):  # 遍历每个问题
+#         input_ = row["问题"]
+#         fine_level_label = ""#row["事项"]  # 最细粒度层级的业务事项标签
+
+#         for attempt in range(1, MAX_RETRIES + 1):
+#             try:
+#                 upsteam_set = set()
+#                 question_results = {level: [] for level in infer_result}  # 本题临时结果，失败时不污染 infer_result
+
+#                 for l in range(len(name_level)):  # 遍历每个层级
+#                     level_number = l + 1
+#                     domain_level = f"level{level_number}"
+#                     # 收集本层级需推理的 (n, domain_name, domain_desc, domain_descendant)
+#                     tasks = []
+#                     for n in range(len(name_level[domain_level])):
+#                         domain_name = name_level[domain_level][n]["name"]
+#                         domain_desc = name_level[domain_level][n]["desc"]
+#                         domain_descendant = descendant[domain_level][domain_name]
+#                         if domain_level != "level1":
+#                             upstream_domain = ancestry[domain_name][f"level{level_number-1}"]
+#                             if upstream_domain not in upsteam_set:
+#                                 continue
+#                         tasks.append((n, domain_name, domain_desc, domain_descendant))
+
+#                     # 本层级多线程并发推理
+#                     level_results = []
+#                     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+#                         futures = [executor.submit(_infer_one, input_, t) for t in tasks]
+#                         for future in as_completed(futures):
+#                             level_results.append(future.result())
+#                     level_results.sort(key=lambda x: x[0])  # 按 n 排序，保证顺序一致
+
+#                     for _, domain_name, judgement, reasoning in level_results:
+#                         question_results[domain_level].append({
+#                             "question_id": index,
+#                             "question": input_,
+#                             "label": fine_level_label,
+#                             "target": domain_name,
+#                             "judgement": judgement,
+#                             "reasoning": reasoning,
+#                         })
+#                         if judgement:
+#                             upsteam_set.add(domain_name)
+
+#                 # 本题全部层级推理成功，加锁合并到总结果并持久化
+#                 with json_write_lock:
+#                     for level in infer_result:
+#                         infer_result[level].extend(question_results[level])
+#                     with open(os.path.join(DATA_DIR, "domain_infer_result_jdyw.json"), "w", encoding="utf-8") as f:
+#                         json.dump(infer_result, f, ensure_ascii=False, indent=2)
+#                 break  # 成功，退出重试循环
+
+#             except Exception as e:
+#                 print(f"\n[question_id={index}] 第 {attempt}/{MAX_RETRIES} 次尝试失败：{e}")
+#                 if attempt < MAX_RETRIES:
+#                     time.sleep(RETRY_DELAY)
+#                 else:
+#                     print(f"[question_id={index}] 已达最大重试次数，跳过该问题。")
+
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    # 全局锁和结果容器
+    json_write_lock = threading.Lock()
+    infer_result = {f"level{i+1}": [] for i in range(len(name_level))}
+
+    def process_single_question(question_data):
+        """处理单个问题的完整逻辑（包含内部层级循环）"""
+        index, row = question_data
         input_ = row["问题"]
-        fine_level_label = ""#row["事项"]  # 最细粒度层级的业务事项标签
+        fine_level_label = ""
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 upsteam_set = set()
-                question_results = {level: [] for level in infer_result}  # 本题临时结果，失败时不污染 infer_result
+                question_results = {level: [] for level in infer_result}
 
-                for l in range(len(name_level)):  # 遍历每个层级
+                # 内部层级循环（保持串行，每层内部并发）
+                for l in range(len(name_level)):
                     level_number = l + 1
                     domain_level = f"level{level_number}"
-                    # 收集本层级需推理的 (n, domain_name, domain_desc, domain_descendant)
+
+                    # 构建当前层级任务
                     tasks = []
                     for n in range(len(name_level[domain_level])):
                         domain_name = name_level[domain_level][n]["name"]
                         domain_desc = name_level[domain_level][n]["desc"]
                         domain_descendant = descendant[domain_level][domain_name]
+
                         if domain_level != "level1":
                             upstream_domain = ancestry[domain_name][f"level{level_number-1}"]
                             if upstream_domain not in upsteam_set:
                                 continue
                         tasks.append((n, domain_name, domain_desc, domain_descendant))
 
-                    # 本层级多线程并发推理
+                    # 单层并发推理
                     level_results = []
                     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                         futures = [executor.submit(_infer_one, input_, t) for t in tasks]
                         for future in as_completed(futures):
                             level_results.append(future.result())
-                    level_results.sort(key=lambda x: x[0])  # 按 n 排序，保证顺序一致
 
+                    level_results.sort(key=lambda x: x[0])
+
+                    # 处理结果
                     for _, domain_name, judgement, reasoning in level_results:
                         question_results[domain_level].append({
                             "question_id": index,
@@ -358,18 +434,29 @@ if __name__ == "__main__":
                         if judgement:
                             upsteam_set.add(domain_name)
 
-                # 本题全部层级推理成功，加锁合并到总结果并持久化
+                # 成功后写入（加锁保护）
                 with json_write_lock:
                     for level in infer_result:
                         infer_result[level].extend(question_results[level])
-                    with open(os.path.join(DATA_DIR, "infer_result.json"), "w", encoding="utf-8") as f:
+                    with open(os.path.join(DATA_DIR, "domain_infer_result_jdyw.json"), "w", encoding="utf-8") as f:
                         json.dump(infer_result, f, ensure_ascii=False, indent=2)
-                break  # 成功，退出重试循环
+                return index, "success", None
 
             except Exception as e:
-                print(f"\n[question_id={index}] 第 {attempt}/{MAX_RETRIES} 次尝试失败：{e}")
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAY)
                 else:
-                    print(f"[question_id={index}] 已达最大重试次数，跳过该问题。")
+                    return index, "failed", str(e)
 
+    # 外层并发执行
+    question_items = list(df_copy.iterrows())
+    with ThreadPoolExecutor(max_workers=16) as executor:  # 控制并发问题数
+        futures = {executor.submit(process_single_question, item): item[0] for item in question_items}
+
+        # 进度追踪
+        with tqdm(total=len(question_items)) as pbar:
+            for future in as_completed(futures):
+                idx, status, error = future.result()
+                if status == "failed":
+                    print(f"[question_id={idx}] 处理失败：{error}")
+                pbar.update(1)
