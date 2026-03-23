@@ -66,24 +66,30 @@ def qwen(prompt: str, web_search: bool = False, enable_thinking: bool = False) -
 
 # ─── chat：内部 MLP 网关接口 ────────────────────────────────────────────────
 
+#"sk-5a5c8fea7cc14d779a201d8ab0be8f91"
+
 @retry(max_retries=3, sleep_seconds=5.0)
-def chat(
-    messages: str,
-    vendor: str = "aliyun",
-    model: str = "qwen2.5-32b-instruct",
-) -> dict:
-    URL = f"http://mlp.paas.dc.servyou-it.com/mudgate/api/llm/{vendor}/v1/chat/completions"
-    app_id = "sk-0609aa6d08de4413a72e14b3fb8fbab1"
+def chat(messages: str, vendor: str = "volc", model: str = "deepseek-v3.2") -> str:
+    if vendor == "servyou":
+        URL = f"http://10.199.0.7:5000/api/llm/{vendor}/v1/chat/completions"
+        app_id = "sk-d75b519b704d4d348245efe435f08ff3"
+    else:
+        URL = f"http://mlp.paas.dc.servyou-it.com/mudgate/api/llm/{vendor}/v1/chat/completions"
+        app_id = "sk-0609aa6d08de4413a72e14b3fb8fbab1"
+        
     HEADERS = {"Content-Type": "application/json", "Authorization": app_id}
+    messages = [{"role": "user", "content": messages}]
     PAYLOAD = {
         "appId": app_id,
         "model": model,
-        "messages": [{"role": "user", "content": messages}],
+        "messages": messages,
         "stream": False,
         "top_p": 0.7,
         "temperature": 0.5,
+        # "enable_thinking": True,
+        # "enable_search":True
     }
     response = requests.post(URL, data=json.dumps(PAYLOAD), headers=HEADERS).json()
     if "success" in response:
         raise Exception(response["errorContext"])
-    return response["choices"][0]["message"]
+    return response["choices"][0]["message"]#["content"]

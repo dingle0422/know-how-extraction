@@ -262,3 +262,97 @@ def run_mapreduce_inference(
     df.to_csv(output_csv_path, index=False, encoding="utf-8-sig")
     print(f"\n[Infer] 推理完成！结果保存至: {output_csv_path}")
     return output_csv_path
+
+
+if __name__ == "__main__":
+    import os
+    import tempfile
+
+    print("=" * 60)
+    print("[mapreduce_infer] 开始独立测试")
+    print("=" * 60)
+
+    mock_kh = {
+        "0": {
+            "Final_Know_How": (
+                "合同签订须双方签字盖章，条款需合法合规；涉及税务事项应及时索取合法凭证，"
+                "否则可能导致税前扣除被否认。"
+            )
+        },
+        "1": {
+            "Final_Know_How": (
+                "增值税专用发票认证需在开票之日起360天内完成；"
+                "进项税额抵扣须取得合规发票并完成认证。"
+            )
+        },
+    }
+
+    mock_questions = pd.DataFrame(
+        {
+            "question": [
+                "签合同时需要注意哪些税务风险?",
+                "进项发票过了认证期限怎么处理?",
+            ]
+        }
+    )
+
+    def _mock_map_llm(prompt: str) -> dict:
+        return {
+            "content": json.dumps(
+                {
+                    "Match_Status": "YES",
+                    "Rejection_Reason": "",
+                    "Reasoning_Chain": "问题与知识块高度相关，可直接推导答案。",
+                    "Derived_Answer": "需及时取得合法凭证，关注合同条款的税务合规性。",
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    def _mock_reduce_llm(prompt: str) -> dict:
+        return {
+            "content": json.dumps(
+                {
+                    "Synthesis_Analysis": "综合多个知识块分析：建议在合同签订阶段即明确税务条款。",
+                    "Final_Answer": "签合同时应明确税务条款，及时索取合法凭证，关注发票认证期限。",
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    def _mock_infer_prompt(question: str, kh_text: str) -> str:
+        return f"问题：{question}\n知识：{kh_text}"
+
+    def _mock_summary_prompt(question: str, extra_info: str, candidates_text: str) -> str:
+        return f"汇总问题：{question}\n候选答案：{candidates_text[:100]}"
+
+    tmp_dir = tempfile.mkdtemp()
+    kh_path = os.path.join(tmp_dir, "kh_test.json")
+    csv_path = os.path.join(tmp_dir, "test_questions.csv")
+    output_path = os.path.join(tmp_dir, "infer_output.csv")
+
+    with open(kh_path, "w", encoding="utf-8") as f:
+        json.dump(mock_kh, f, ensure_ascii=False, indent=2)
+
+    mock_questions.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    result = run_mapreduce_inference(
+        kh_json_path=kh_path,
+        test_csv_path=csv_path,
+        output_csv_path=output_path,
+        map_llm_func=_mock_map_llm,
+        reduce_llm_func=_mock_reduce_llm,
+        infer_prompt_func=_mock_infer_prompt,
+        summary_prompt_func=_mock_summary_prompt,
+        max_workers=2,
+    )
+
+    df_out = pd.read_csv(result, encoding="utf-8-sig")
+    print(f"\n测试结果预览（共 {len(df_out)} 条）:")
+    for _, row in df_out.iterrows():
+        print(f"  Q: {row['question']}")
+        print(f"  Map命中: {row.get('Map_Match_Count')}/{row.get('Map_Total_Evaluated')}")
+        print(f"  A: {str(row.get('Final_Inference_Answer', ''))[:80]}")
+        print()
+
+    print("[mapreduce_infer] 测试完成！")

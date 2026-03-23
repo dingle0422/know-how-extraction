@@ -4,13 +4,18 @@
 """
 
 import os
+import sys
 import json
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-from prompts import safe_parse_json
+try:
+    from prompts import safe_parse_json
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from prompts import safe_parse_json
 
 compress_lock = Lock()
 
@@ -184,3 +189,72 @@ def run_level2_compression(
 
     print(f"[Level-2] 全部完成！结果保存于: {output_file}")
     return output_file
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    print("=" * 60)
+    print("[level2_compress] 开始独立测试")
+    print("=" * 60)
+
+    mock_level1 = {
+        "0": {
+            "index": 0,
+            "Know_How": "合同签订需双方签字盖章，条款须合法合规，涉及税务事项须及时取得合法凭证。",
+            "status": "success",
+        },
+        "1": {
+            "index": 1,
+            "Know_How": "增值税发票认证需登录综合服务平台完成勾选，认证期限为360天。",
+            "status": "success",
+        },
+        "2": {
+            "index": 2,
+            "Know_How": "企业所得税汇算清缴需在次年5月31日前完成，各项费用须满足税前扣除标准。",
+            "status": "success",
+        },
+        "3": {
+            "index": 3,
+            "Know_How": "个人所得税综合所得汇算清缴需在次年3月1日至6月30日内办理。",
+            "status": "success",
+        },
+    }
+
+    def _mock_llm(prompt: str) -> dict:
+        return {
+            "content": (
+                '{"Synthesis_Summary": "财税综合管理知识整合", '
+                '"Final_Know_How": "合同管理、发票认证、企业所得税及个税汇算清缴的综合财税知识要点。"}'
+            )
+        }
+
+    def _mock_prompt(f: str) -> str:
+        return f"请压缩整合以下知识片段：\n{f}"
+
+    tmp_dir = tempfile.mkdtemp()
+    level1_file = os.path.join(tmp_dir, "kh_level1_test.json")
+    output_file = os.path.join(tmp_dir, "kh_level2_test.json")
+
+    with open(level1_file, "w", encoding="utf-8") as f:
+        json.dump(mock_level1, f, ensure_ascii=False, indent=2)
+
+    result = run_level2_compression(
+        level1_file=level1_file,
+        llm_func=_mock_llm,
+        prompt_func=_mock_prompt,
+        output_file=output_file,
+        batch_size=2,
+        max_workers=2,
+    )
+
+    with open(result, encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(f"\n测试结果预览（共 {len(data)} 个批次）:")
+    for k, v in sorted(data.items(), key=lambda x: int(x[0])):
+        status = v.get("status")
+        kh_preview = str(v.get("Final_Know_How", ""))[:60]
+        print(f"  [批次 {k}] status={status} | Final_Know_How: {kh_preview}...")
+
+    print("\n[level2_compress] 测试完成！")

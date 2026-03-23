@@ -158,3 +158,62 @@ def run_level1_extraction(
 
     print(f"[Level-1] 全部完成！结果保存于: {output_file}")
     return output_file
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    print("=" * 60)
+    print("[level1_extract] 开始独立测试")
+    print("=" * 60)
+
+    def _mock_llm(prompt: str) -> dict:
+        return {
+            "content": (
+                '{"Know_How": "合同签订时需双方签字盖章，条款需合法合规，'
+                '涉及税务事项应及时取得合法凭证。", "Logic_Diagnosis": "逻辑正常"}'
+            )
+        }
+
+    def _mock_prompt(eb, q, r, a):
+        return f"领域:{eb}\n问题:{q}\n答案:{a}"
+
+    test_df = pd.DataFrame(
+        {
+            "question": [
+                "合同签订需要注意什么?",
+                "增值税发票如何认证?",
+                "企业所得税汇算清缴截止日期是?",
+            ],
+            "reasoning": ["...", "...", "..."],
+            "answer": [
+                "需双方签字盖章，条款合法合规。",
+                "登录增值税发票综合服务平台进行勾选认证。",
+                "次年5月31日前完成汇算清缴。",
+            ],
+        }
+    )
+
+    tmp_dir = tempfile.mkdtemp()
+    output_file = os.path.join(tmp_dir, "kh_level1_test.json")
+
+    result = run_level1_extraction(
+        data_train=test_df,
+        eb="财税",
+        llm_func=_mock_llm,
+        prompt_func=_mock_prompt,
+        output_file=output_file,
+        max_workers=2,
+        max_retries=3,
+    )
+
+    with open(result, encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(f"\n测试结果预览（共 {len(data)} 条）:")
+    for k, v in sorted(data.items(), key=lambda x: int(x[0])):
+        status = v.get("status")
+        kh_preview = str(v.get("Know_How", ""))[:60]
+        print(f"  [{k}] status={status} | Know_How: {kh_preview}...")
+
+    print("\n[level1_extract] 测试完成！")

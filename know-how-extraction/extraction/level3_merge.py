@@ -4,10 +4,15 @@
 """
 
 import os
+import sys
 import json
 import time
 
-from prompts import safe_parse_json
+try:
+    from prompts import safe_parse_json
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from prompts import safe_parse_json
 
 
 def _save_progress(progress_file: str, batch_idx: int, kh_text: str):
@@ -159,3 +164,73 @@ def run_level3_merge(
     print(f"\n--- 最终 Know-How 预览（前 500 字符）---")
     print(current_kh[:500], "..." if len(current_kh) > 500 else "")
     return final_output_file
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    print("=" * 60)
+    print("[level3_merge] 开始独立测试")
+    print("=" * 60)
+
+    mock_level2 = {
+        "0": {
+            "batch_index": 0,
+            "source_indices": [0, 1],
+            "item_count": 2,
+            "Final_Know_How": "合同签订及增值税发票认证的综合管理要点：合同须双方签字盖章，发票认证需在360天内完成。",
+            "status": "success",
+        },
+        "1": {
+            "batch_index": 1,
+            "source_indices": [2, 3],
+            "item_count": 2,
+            "Final_Know_How": "企业所得税汇算清缴（次年5月31日前）及个税汇算清缴（次年3-6月）的期限与扣除要点。",
+            "status": "success",
+        },
+    }
+
+    call_count = {"n": 0}
+
+    def _mock_llm(prompt: str) -> dict:
+        call_count["n"] += 1
+        return {
+            "content": (
+                f'{{"Merged_Know_How": "合同、发票、企业所得税及个税汇算清缴综合财税知识库（第{call_count["n"]}次合并）。", '
+                f'"Merge_Log": "正常合并，新增知识已整合"}}'
+            )
+        }
+
+    def _mock_merge_prompt(existing: str, increment: str) -> str:
+        return f"请合并以下知识：\n已有：{existing[:50]}\n新增：{increment[:50]}"
+
+    def _mock_shrink_prompt(kh_text: str, target_chars: int = 5000) -> str:
+        return f"请将以下知识压缩至{target_chars}字以内：\n{kh_text[:50]}"
+
+    tmp_dir = tempfile.mkdtemp()
+    level2_file = os.path.join(tmp_dir, "kh_level2_test.json")
+    progress_file = os.path.join(tmp_dir, "kh_merge_progress_test.json")
+    final_output = os.path.join(tmp_dir, "kh_final_test.json")
+
+    with open(level2_file, "w", encoding="utf-8") as f:
+        json.dump(mock_level2, f, ensure_ascii=False, indent=2)
+
+    result = run_level3_merge(
+        level2_file=level2_file,
+        llm_func=_mock_llm,
+        merge_prompt_func=_mock_merge_prompt,
+        shrink_prompt_func=_mock_shrink_prompt,
+        progress_file=progress_file,
+        final_output_file=final_output,
+    )
+
+    with open(result, encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(f"\n测试结果预览:")
+    print(f"  status: {data.get('status')}")
+    print(f"  合并批次数: {data.get('total_l2_batches_merged')}")
+    print(f"  最终 KH 字符数: {data.get('final_kh_length')}")
+    print(f"  内容前100字: {str(data.get('Final_Know_How', ''))[:100]}")
+
+    print("\n[level3_merge] 测试完成！")
