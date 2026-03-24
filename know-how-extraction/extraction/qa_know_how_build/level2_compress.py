@@ -3,6 +3,7 @@
 支持多线程并发 + 断点续传。
 """
 
+import math
 import os
 import sys
 import json
@@ -12,10 +13,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 try:
-    from prompts import safe_parse_json
+    from prompts import safe_parse_json_with_llm_repair
 except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from prompts import safe_parse_json
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from prompts import safe_parse_json_with_llm_repair
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from k_means_constrained import KMeansConstrained
+    _CLUSTERING_AVAILABLE = True
+except ImportError:
+    _CLUSTERING_AVAILABLE = False
 
 compress_lock = Lock()
 
@@ -50,8 +58,49 @@ def load_level1_results(level1_file: str) -> list[dict]:
 
 
 def make_batches(items: list[dict], batch_size: int = 10) -> list[list[dict]]:
-    batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-    print(f"[Level-2] 共 {len(batches)} 个批次，每批最多 {batch_size} 条")
+    """
+    将 items 按语义相似度分批：使用 TF-IDF 向量化 + 均衡 K-Means 聚类，
+    保证每批条数 <= batch_size。
+    若依赖库未安装，自动回退到顺序分块。
+    """
+    n = len(items)
+    k = math.ceil(n / batch_size)
+
+    if n <= batch_size:
+        print(f"[Level-2] 共 1 个批次，每批最多 {batch_size} 条")
+        return [items]
+
+    if not _CLUSTERING_AVAILABLE:
+        print(
+            "[Level-2] 警告：未找到 sklearn 或 k-means-constrained，"
+            "回退到顺序分块。可运行 `pip install scikit-learn k-means-constrained` 启用语义聚类。"
+        )
+        batches = [items[i: i + batch_size] for i in range(0, n, batch_size)]
+        print(f"[Level-2] 共 {len(batches)} 个批次（顺序分块），每批最多 {batch_size} 条")
+        return batches
+
+    texts = [item["Know_How"] for item in items]
+    vectorizer = TfidfVectorizer(max_features=512)
+    X = vectorizer.fit_transform(texts)
+
+    clf = KMeansConstrained(
+        n_clusters=k,
+        size_max=batch_size,
+        random_state=42,
+        n_init=10,
+    )
+    labels = clf.fit_predict(X)
+
+    cluster_map: dict[int, list[dict]] = {}
+    for item, label in zip(items, labels):
+        cluster_map.setdefault(int(label), []).append(item)
+
+    batches = list(cluster_map.values())
+    sizes = [len(b) for b in batches]
+    print(
+        f"[Level-2] 共 {len(batches)} 个批次（TF-IDF 语义聚类），"
+        f"每批最多 {batch_size} 条，实际批次大小：min={min(sizes)}, max={max(sizes)}, avg={sum(sizes)/len(sizes):.1f}"
+    )
     return batches
 
 
@@ -94,9 +143,11 @@ def _process_compression_batch(
             response = llm_func(prompt_func(f=snippets_text))
 
             try:
-                content = safe_parse_json(response["content"])
+                content = safe_parse_json_with_llm_repair(
+                    response["content"], llm_func=llm_func
+                )
             except Exception as json_err:
-                raise Exception(f"JSON 解析失败: {json_err}")
+                raise Exception(f"JSON 解析失败（含LLM修复）: {json_err}")
 
             if "Final_Know_How" not in content:
                 raise Exception("响应缺少必需字段 'Final_Know_How'")
@@ -192,59 +243,33 @@ def run_level2_compression(
 
 
 if __name__ == "__main__":
-    import tempfile
+    from llm_client import chat
+    from prompts import compression_v2
 
     print("=" * 60)
-    print("[level2_compress] 开始独立测试")
+    print("[level2_compress] 开始独立测试（真实 LLM 调用）")
     print("=" * 60)
 
-    mock_level1 = {
-        "0": {
-            "index": 0,
-            "Know_How": "合同签订需双方签字盖章，条款须合法合规，涉及税务事项须及时取得合法凭证。",
-            "status": "success",
-        },
-        "1": {
-            "index": 1,
-            "Know_How": "增值税发票认证需登录综合服务平台完成勾选，认证期限为360天。",
-            "status": "success",
-        },
-        "2": {
-            "index": 2,
-            "Know_How": "企业所得税汇算清缴需在次年5月31日前完成，各项费用须满足税前扣除标准。",
-            "status": "success",
-        },
-        "3": {
-            "index": 3,
-            "Know_How": "个人所得税综合所得汇算清缴需在次年3月1日至6月30日内办理。",
-            "status": "success",
-        },
-    }
+    # 直接读取 level1 的真实输出文件（json.load 会自动将 \n 还原为真正换行符）
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    level1_file = os.path.join(output_dir, "kh_level1_test.json")
+    if not os.path.exists(level1_file):
+        raise FileNotFoundError(
+            f"未找到 level1 输出文件：{level1_file}\n"
+            "请先运行 level1_extract.py 生成该文件。"
+        )
 
-    def _mock_llm(prompt: str) -> dict:
-        return {
-            "content": (
-                '{"Synthesis_Summary": "财税综合管理知识整合", '
-                '"Final_Know_How": "合同管理、发票认证、企业所得税及个税汇算清缴的综合财税知识要点。"}'
-            )
-        }
-
-    def _mock_prompt(f: str) -> str:
-        return f"请压缩整合以下知识片段：\n{f}"
-
-    tmp_dir = tempfile.mkdtemp()
-    level1_file = os.path.join(tmp_dir, "kh_level1_test.json")
-    output_file = os.path.join(tmp_dir, "kh_level2_test.json")
-
-    with open(level1_file, "w", encoding="utf-8") as f:
-        json.dump(mock_level1, f, ensure_ascii=False, indent=2)
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, "kh_level2_test.json")
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
     result = run_level2_compression(
         level1_file=level1_file,
-        llm_func=_mock_llm,
-        prompt_func=_mock_prompt,
+        llm_func=chat,
+        prompt_func=compression_v2,
         output_file=output_file,
-        batch_size=2,
+        batch_size=10,
         max_workers=2,
     )
 
@@ -256,5 +281,15 @@ if __name__ == "__main__":
         status = v.get("status")
         kh_preview = str(v.get("Final_Know_How", ""))[:60]
         print(f"  [批次 {k}] status={status} | Final_Know_How: {kh_preview}...")
+
+    # 导出 Markdown 预览文件
+    md_file = output_file.replace(".json", ".md")
+    with open(md_file, "w", encoding="utf-8") as f:
+        for k, v in sorted(data.items(), key=lambda x: int(x[0])):
+            kh = v.get("Final_Know_How", "").strip()
+            if kh:
+                f.write(kh)
+                f.write("\n\n---\n\n")
+    print(f"Markdown 预览文件已导出：{md_file}")
 
     print("\n[level2_compress] 测试完成！")

@@ -4,14 +4,20 @@
 """
 
 import os
+import sys
 import json
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-import json5
 import pandas as pd
+
+try:
+    from prompts import safe_parse_json_with_llm_repair
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from prompts import safe_parse_json_with_llm_repair
 
 file_lock = Lock()
 
@@ -32,7 +38,6 @@ def _update_json_file(file_path: str, key: str, value: dict):
 def _process_single_item(
     c: int,
     data_train: pd.DataFrame,
-    eb: str,
     llm_func,
     prompt_func,
     output_file: str,
@@ -41,6 +46,7 @@ def _process_single_item(
     q = data_train["question"].iloc[c]
     r = data_train["reasoning"].iloc[c]
     a = data_train["answer"].iloc[c]
+    ub = data_train["User_Behavior"].iloc[c]
 
     retry_count = 0
     last_error_msg = ""
@@ -49,6 +55,12 @@ def _process_single_item(
         if max_retries is not None and retry_count >= max_retries:
             error_info = {
                 "index": c,
+                "input": {
+                    "question": q,
+                    "reasoning": r,
+                    "answer": a,
+                    "User_Behavior": ub,
+                },
                 "status": "failed",
                 "error": "达到最大重试次数",
                 "retry_count": retry_count,
@@ -60,12 +72,14 @@ def _process_single_item(
             return c, "failed", None
 
         try:
-            response = llm_func(prompt_func(eb, q, r, a))
+            response = llm_func(prompt_func(ub, q, r, a))
             try:
-                content = json5.loads(response["content"])
+                content = safe_parse_json_with_llm_repair(
+                    response["content"], llm_func=llm_func
+                )
             except Exception as json_err:
                 raise Exception(
-                    f"JSON解析失败: {json_err} | 原始内容: "
+                    f"JSON解析失败（含LLM修复）: {json_err} | 原始内容: "
                     f"{str(response.get('content', 'N/A'))[:100]}"
                 )
 
@@ -74,6 +88,12 @@ def _process_single_item(
 
             result = {
                 "index": c,
+                "input": {
+                    "question": q,
+                    "reasoning": r,
+                    "answer": a,
+                    "User_Behavior": ub,
+                },
                 "Know_How": content["Know_How"],
                 "Logic_Diagnosis": content.get("Logic_Diagnosis", ""),
                 "status": "success",
@@ -98,11 +118,10 @@ def _process_single_item(
 
 def run_level1_extraction(
     data_train: pd.DataFrame,
-    eb: str,
     llm_func,
     prompt_func,
-    output_file: str = "./kh_results_level1.json",
-    max_workers: int = 16,
+    output_file: str = "./output/kh_results_level1.json",
+    max_workers: int = os.cpu_count() or 4,
     max_retries: int = 100,
 ):
     """
@@ -111,7 +130,6 @@ def run_level1_extraction(
     Parameters
     ----------
     data_train : 训练数据（需含 question, reasoning, answer 列）
-    eb : 业务领域标签
     llm_func : LLM 调用函数（如 chat 或 qwen）
     prompt_func : 一级提炼 prompt 构造函数（如 single_v1）
     output_file : JSON 输出路径（支持断点续传）
@@ -142,7 +160,7 @@ def run_level1_extraction(
         future_to_idx = {
             executor.submit(
                 _process_single_item,
-                c, data_train, eb, llm_func, prompt_func, output_file, max_retries,
+                c, data_train, llm_func, prompt_func, output_file, max_retries,
             ): c
             for c in pending_indices
         }
@@ -161,22 +179,12 @@ def run_level1_extraction(
 
 
 if __name__ == "__main__":
-    import tempfile
+    from llm_client import chat
+    from prompts import single_v1
 
     print("=" * 60)
-    print("[level1_extract] 开始独立测试")
+    print("[level1_extract] 开始独立测试（真实 LLM 调用）")
     print("=" * 60)
-
-    def _mock_llm(prompt: str) -> dict:
-        return {
-            "content": (
-                '{"Know_How": "合同签订时需双方签字盖章，条款需合法合规，'
-                '涉及税务事项应及时取得合法凭证。", "Logic_Diagnosis": "逻辑正常"}'
-            )
-        }
-
-    def _mock_prompt(eb, q, r, a):
-        return f"领域:{eb}\n问题:{q}\n答案:{a}"
 
     test_df = pd.DataFrame(
         {
@@ -185,23 +193,30 @@ if __name__ == "__main__":
                 "增值税发票如何认证?",
                 "企业所得税汇算清缴截止日期是?",
             ],
-            "reasoning": ["...", "...", "..."],
+            "reasoning": [
+                "合同签订涉及民法典合同编相关规定，需要关注主体资格、条款合法性及签章要求。",
+                "增值税发票认证目前主要通过增值税发票综合服务平台进行勾选确认操作。",
+                "根据企业所得税法规定，汇算清缴应在纳税年度终了之日起五个月内完成。",
+            ],
             "answer": [
                 "需双方签字盖章，条款合法合规。",
                 "登录增值税发票综合服务平台进行勾选认证。",
                 "次年5月31日前完成汇算清缴。",
             ],
+            "User_Behavior": ["借款业务", "借款业务", "借款业务"],
         }
     )
 
-    tmp_dir = tempfile.mkdtemp()
-    output_file = os.path.join(tmp_dir, "kh_level1_test.json")
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, "kh_level1_test.json")
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
     result = run_level1_extraction(
         data_train=test_df,
-        eb="财税",
-        llm_func=_mock_llm,
-        prompt_func=_mock_prompt,
+        llm_func=chat,
+        prompt_func=single_v1,
         output_file=output_file,
         max_workers=2,
         max_retries=3,
@@ -215,5 +230,15 @@ if __name__ == "__main__":
         status = v.get("status")
         kh_preview = str(v.get("Know_How", ""))[:60]
         print(f"  [{k}] status={status} | Know_How: {kh_preview}...")
+
+    # 导出 Markdown 预览文件（json.load 已将 \n 还原为真正换行符）
+    md_file = output_file.replace(".json", ".md")
+    with open(md_file, "w", encoding="utf-8") as f:
+        for k, v in sorted(data.items(), key=lambda x: int(x[0])):
+            kh = v.get("Know_How", "").strip()
+            if kh:
+                f.write(kh)
+                f.write("\n\n---\n\n")
+    print(f"\nMarkdown 预览文件已导出：{md_file}")
 
     print("\n[level1_extract] 测试完成！")
