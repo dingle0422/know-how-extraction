@@ -515,7 +515,7 @@ if __name__ == "__main__":
             output_dir=output_dir,
             knowledge_dir=knowledge_dir,
             force_llm_toc=True,
-            max_workers=2,
+            max_workers=os.cpu_count() or 4,
             max_retries=100,
         )
 

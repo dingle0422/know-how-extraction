@@ -194,7 +194,7 @@ def make_batches(items: list[dict], batch_size: int = 10) -> list[dict]:
         return result
 
     vectorizer = _make_vectorizer()
-    X = vectorizer.fit_transform(texts)
+    X = vectorizer.fit_transform(texts).toarray()
     feature_names = vectorizer.get_feature_names_out()
 
     k = math.ceil(n / batch_size)
@@ -543,8 +543,8 @@ if __name__ == "__main__":
             level2_prompt_func=compression_v2,
             output_dir=output_dir,
             knowledge_dir=knowledge_dir,
-            level1_max_workers=4,
-            level2_max_workers=2,
+            level1_max_workers=os.cpu_count() or 4,
+            level2_max_workers=os.cpu_count() or 4,
             level2_batch_size=5,
             max_retries=100,
         )
