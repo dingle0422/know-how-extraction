@@ -176,9 +176,9 @@ def single_v0(eb = None, q = None, r = None, a = None, kh = None):
 4. **绝对尊重原文 （Subject to Input Data）**：所有泛化提炼内容，必须是 `<Standard_Answer>` 和 `<Reasoning_Chain>` 中提及的标准或与事实高度相关的行业标准，否则宁可不要
 
 # Input Data
-<User_Behavior>
+<Extra_Information>
 {eb}
-</User_Behavior>
+</Extra_Information>
 
 <User_Question>
 {q}
@@ -244,9 +244,9 @@ def single_v1(eb = None, q = None, r = None, a = None):
 4. **零重复**：如果 `<Standard_Answer>;` 和 `<Reasoning_Chain>;` 仅为简单事实陈述且无法提炼出通用规则（如纯数值计算、特定日期查询），则判定为"无通用知识可抽取"，输出空字符串。
 
 # Input Data
-<User_Behavior>;
+<Extra_Information>;
 {eb}
-</User_Behavior>;
+</Extra_Information>;
 
 <User_Question>;
 {q}
@@ -648,6 +648,111 @@ def potential_pitfalls():
     }}
 ]"""
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Layer 0 Prompts：文档结构化解析
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def knowledge_description_prompt(source_text_head: str) -> str:
+    """
+    生成 knowledge.md 的 prompt：基于源文档头部内容，生成知识概述。
+    输出供智能体判断该知识库是否适用于当前问题。
+    """
+    return f"""# Task
+你是一个专业的知识库索引引擎。请阅读下面的文档内容（截取自源文档头部），为该知识库生成一份**简洁、精准的知识概述**。
+
+# 目标
+生成的概述将作为该知识库的"目录卡片"，帮助智能体快速判断：**当收到一个用户问题时，该知识库是否包含可用于回答该问题的相关知识。**
+
+# 输出要求
+1. **核心主题**（1-2 句话）：该知识库主要覆盖什么领域/行业/业务场景？
+2. **关键知识点**（3-10 个要点）：列出该知识库覆盖的主要知识模块、核心概念或业务主题，每个要点一句话。
+3. **适用问题类型**（2-5 条）：列出该知识库适合回答哪些类型的问题。
+4. **不适用场景**（1-3 条）：列出该知识库明确不涉及的领域或问题类型。
+
+# 格式要求
+直接输出 Markdown 格式，不要用 JSON 包裹，不要包含任何代码围栏标记。
+
+# 源文档内容（头部节选）
+<Source_Document_Head>
+{source_text_head[:20000]}
+</Source_Document_Head>
+"""
+
+
+def doc_page_toc_summary_prompt(page_number: int, page_text: str) -> str:
+    """
+    构造逐页目录标题摘要 prompt。
+    让 LLM 对单页内容生成 1~N 个精简目录标题（一页可能涵盖多个主题）。
+    """
+    return f"""# Task
+你是一个专业的文档结构分析引擎。请阅读下面第 **{page_number}** 页的内容，为其生成**精简的目录标题**。
+
+# 分析要求
+1. 提炼该页内容涉及的**核心主题**，每个主题生成一个简洁的目录标题（10~30 字）
+2. 一页内容可能涉及 1 个或多个不同主题，请如实拆分，不要遗漏也不要强行合并
+3. 为每个标题判断层级：level 1 = 章/篇级（最高层），level 2 = 节级，level 3 = 子节级
+4. 如果页面内容本身已包含明确的标题行（如"第X章"、"X.X"等），直接使用原始标题
+5. 如果页面内容是纯目录页、版权页、空白页或无实质内容，返回空数组
+
+# 关键规则
+- 标题必须准确概括该段内容的核心主题，不要使用过于泛化的标题（如"概述"、"介绍"）
+- 不要编造页面中不存在的内容
+
+# Output Format
+严格输出以下 JSON，不要包含任何 Markdown 标记或额外文字：
+{{
+  "page": {page_number},
+  "titles": [
+    {{"title": "该页第一个主题的目录标题", "level": 1}},
+    {{"title": "该页第二个主题的目录标题（如有）", "level": 2}}
+  ]
+}}
+如果该页无实质内容，titles 为空数组：{{"page": {page_number}, "titles": []}}
+
+# 第 {page_number} 页内容
+<Page_Content>
+{page_text}
+</Page_Content>
+"""
+
+
+def doc_toc_keywords_prompt(entries: list[dict]) -> str:
+    """
+    构造 LLM 目录关键词批量提取 prompt。
+    entries: [{"title": "章节标题", "snippet": "内容摘要片段"}, ...]
+    """
+    entries_text = ""
+    for i, e in enumerate(entries):
+        entries_text += f"\n【条目 {i+1}】标题: {e['title']}\n内容摘要: {e['snippet']}\n"
+
+    return f"""# Task
+你是一个专业的文档知识索引引擎。请为下面的每个目录条目提取 3~8 个**核心关键词**。
+
+# 关键词提取要求
+1. 关键词应反映该章节的核心主题、涉及的专业概念和关键术语
+2. 优先提取专业术语和领域概念，避免过于通用的词汇（如"介绍"、"概述"）
+3. 每个条目独立提取，关键词之间不要重复
+
+# 输入条目
+{entries_text}
+
+# Output Format
+严格输出以下 JSON，keywords 数组的长度和顺序必须与输入条目一一对应：
+{{
+  "keywords": [
+    ["关键词1", "关键词2", "关键词3"],
+    ["关键词A", "关键词B", "关键词C"],
+    ...
+  ]
+}}
+不要包含任何 Markdown 标记或额外文字。
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Layer 1 Prompt：文档知识提炼
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def doc_extract_v1(paragraph: str) -> str:
     return f"""# Role

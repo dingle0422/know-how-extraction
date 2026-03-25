@@ -46,7 +46,7 @@ def _process_single_item(
     q = data_train["question"].iloc[c]
     r = data_train["reasoning"].iloc[c]
     a = data_train["answer"].iloc[c]
-    ub = data_train["User_Behavior"].iloc[c]
+    ei = data_train["Extra_Information"].iloc[c]
 
     retry_count = 0
     last_error_msg = ""
@@ -59,7 +59,7 @@ def _process_single_item(
                     "question": q,
                     "reasoning": r,
                     "answer": a,
-                    "User_Behavior": ub,
+                    "Extra_Information": ei,
                 },
                 "status": "failed",
                 "error": "达到最大重试次数",
@@ -72,7 +72,7 @@ def _process_single_item(
             return c, "failed", None
 
         try:
-            response = llm_func(prompt_func(ub, q, r, a))
+            response = llm_func(prompt_func(ei, q, r, a))
             try:
                 content = safe_parse_json_with_llm_repair(
                     response["content"], llm_func=llm_func
@@ -92,7 +92,7 @@ def _process_single_item(
                     "question": q,
                     "reasoning": r,
                     "answer": a,
-                    "User_Behavior": ub,
+                    "Extra_Information": ei,
                 },
                 "Know_How": content["Know_How"],
                 "Logic_Diagnosis": content.get("Logic_Diagnosis", ""),
@@ -179,12 +179,17 @@ def run_level1_extraction(
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils import get_source_stem
     from llm_client import chat
     from prompts import single_v1
 
     print("=" * 60)
     print("[level1_extract] 开始独立测试（真实 LLM 调用）")
     print("=" * 60)
+
+    source_file = os.path.join(os.path.dirname(__file__), "input", "jkyw_train_324.csv")
+    source_stem = get_source_stem(source_file)
 
     test_df = pd.DataFrame(
         {
@@ -203,13 +208,13 @@ if __name__ == "__main__":
                 "登录增值税发票综合服务平台进行勾选认证。",
                 "次年5月31日前完成汇算清缴。",
             ],
-            "User_Behavior": ["借款业务", "借款业务", "借款业务"],
+            "Extra_Information": ["借款业务", "借款业务", "借款业务"],
         }
     )
 
     output_dir = os.path.join(os.path.dirname(__file__), "output")
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, "kh_level1_test.json")
+    output_file = os.path.join(output_dir, f"{source_stem}_level1_extraction.json")
     if os.path.exists(output_file):
         os.remove(output_file)
 
@@ -231,7 +236,6 @@ if __name__ == "__main__":
         kh_preview = str(v.get("Know_How", ""))[:60]
         print(f"  [{k}] status={status} | Know_How: {kh_preview}...")
 
-    # 导出 Markdown 预览文件（json.load 已将 \n 还原为真正换行符）
     md_file = output_file.replace(".json", ".md")
     with open(md_file, "w", encoding="utf-8") as f:
         for k, v in sorted(data.items(), key=lambda x: int(x[0])):
