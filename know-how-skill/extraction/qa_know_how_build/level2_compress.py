@@ -404,18 +404,23 @@ def run_full_pipeline_for_qa(
     if ext == ".csv":
         data_train = pd.read_csv(source_file, encoding="utf-8-sig")
     else:
-        data_train = pd.read_excel(source_file)
+        data_train = pd.read_excel(source_file, sheet_name=0)
 
-    required_cols = {"question", "reasoning", "answer"}
+    required_cols = {"question", "answer"}
     missing = required_cols - set(data_train.columns)
     if missing:
         raise ValueError(
             f"源文件 {os.path.basename(source_file)} 缺少必需列: {missing}\n"
-            f"要求: question, reasoning, answer（其他字段放入 Extra_Information）"
+            f"要求: question, answer 为必需列；reasoning 可选（缺失时自动置空）"
         )
 
+    if "reasoning" not in data_train.columns:
+        data_train["reasoning"] = ""
+        print(f"  提示: 源文件中不含 reasoning 列，已自动创建并置空")
+
+    core_cols = {"question", "reasoning", "answer"}
     if "Extra_Information" not in data_train.columns:
-        extra_cols = [c for c in data_train.columns if c not in required_cols]
+        extra_cols = [c for c in data_train.columns if c not in core_cols]
         if extra_cols:
             data_train["Extra_Information"] = data_train[extra_cols].apply(
                 lambda row: "; ".join(f"{k}={v}" for k, v in row.items() if pd.notna(v)),
@@ -480,8 +485,12 @@ def run_full_pipeline_for_qa(
         print(f"  [跳过] Knowledge 目录已存在: {knowledge_sub}")
     else:
         print(f"\n  [Knowledge] 发布到 knowledge 目录...")
-        with open(source_file, "r", encoding="utf-8") as f:
-            source_text_head = f.read(20000)
+        _ext = os.path.splitext(source_file)[1].lower()
+        if _ext == ".csv":
+            with open(source_file, "r", encoding="utf-8") as f:
+                source_text_head = f.read(20000)
+        else:
+            source_text_head = data_train.head(200).to_string(index=False, max_colwidth=120)[:20000]
         publish_to_knowledge(
             source_stem=source_stem,
             final_json_path=level2_file,
