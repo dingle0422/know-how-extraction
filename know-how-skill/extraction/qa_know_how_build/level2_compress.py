@@ -276,6 +276,12 @@ def _process_compression_batch(
             if "Final_Know_How" not in content:
                 raise Exception("响应缺少必需字段 'Final_Know_How'")
 
+            final_kh = content["Final_Know_How"]
+            if isinstance(final_kh, str):
+                final_kh = [final_kh] if final_kh.strip() else []
+            if not isinstance(final_kh, list):
+                raise Exception(f"Final_Know_How 应为 list 类型，实际为 {type(final_kh).__name__}")
+
             result = {
                 "batch_index": batch_idx,
                 "source_indices": [item["index"] for item in batch],
@@ -283,7 +289,7 @@ def _process_compression_batch(
                 "batch_keywords": batch_keywords or [],
                 "batch_cohesion": batch_cohesion,
                 "Synthesis_Summary": content.get("Synthesis_Summary", ""),
-                "Final_Know_How": content["Final_Know_How"],
+                "Final_Know_How": final_kh,
                 "status": "success",
                 "retry_count": retry_count,
             }
@@ -471,10 +477,14 @@ def run_full_pipeline_for_qa(
     md_file = level2_file.replace(".json", ".md")
     with open(md_file, "w", encoding="utf-8") as f:
         for k, v in sorted(l2_data.items(), key=lambda x: int(x[0])):
-            kh = v.get("Final_Know_How", "").strip()
-            if kh:
-                f.write(kh)
-                f.write("\n\n---\n\n")
+            kh = v.get("Final_Know_How", [])
+            if isinstance(kh, str):
+                kh = [kh]
+            for topic in kh:
+                topic = topic.strip()
+                if topic:
+                    f.write(topic)
+                    f.write("\n\n---\n\n")
     print(f"  Markdown 预览文件已导出: {md_file}")
 
     # ── 发布到 knowledge 目录 ──

@@ -156,13 +156,17 @@ def run_mapreduce_inference(
         if not question.strip():
             continue
         for kh_id, kh_info in kh_data.items():
-            kh_text = kh_info.get("Final_Know_How", "")
-            map_task_inputs.append({
-                "q_idx": index,
-                "question": question,
-                "kh_id": kh_id,
-                "kh_text": kh_text,
-            })
+            kh_raw = kh_info.get("Final_Know_How", "")
+            kh_topics = kh_raw if isinstance(kh_raw, list) else [kh_raw]
+            for topic_idx, kh_text in enumerate(kh_topics):
+                if not kh_text.strip():
+                    continue
+                map_task_inputs.append({
+                    "q_idx": index,
+                    "question": question,
+                    "kh_id": f"{kh_id}_{topic_idx}" if len(kh_topics) > 1 else kh_id,
+                    "kh_text": kh_text,
+                })
 
     print(f"\n[阶段一] Map 并发推理... (共 {len(map_task_inputs)} 个子任务)")
     map_results = []
@@ -274,16 +278,16 @@ if __name__ == "__main__":
 
     mock_kh = {
         "0": {
-            "Final_Know_How": (
+            "Final_Know_How": [
                 "合同签订须双方签字盖章，条款需合法合规；涉及税务事项应及时索取合法凭证，"
                 "否则可能导致税前扣除被否认。"
-            )
+            ]
         },
         "1": {
-            "Final_Know_How": (
+            "Final_Know_How": [
                 "增值税专用发票认证需在开票之日起360天内完成；"
                 "进项税额抵扣须取得合规发票并完成认证。"
-            )
+            ]
         },
     }
 

@@ -45,7 +45,10 @@ def export_to_excel(
     for row_idx in data.index:
         l2_key = row_to_l2_key.get(row_idx)
         if l2_key is not None:
-            data.at[row_idx, "二级提炼KH"] = level2[l2_key]["Final_Know_How"]
+            kh = level2[l2_key]["Final_Know_How"]
+            if isinstance(kh, list):
+                kh = "\n\n---\n\n".join(kh)
+            data.at[row_idx, "二级提炼KH"] = kh
 
     print(f"二级 KH 覆盖行数: {data['二级提炼KH'].notna().sum()} / {len(data)}")
 
