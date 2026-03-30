@@ -30,13 +30,10 @@ env/
 *.xlsx
 *.xls
 *.csv
+*.docx
 
 # Intermediate JSON artifacts (regenerable)
-kh_results_*.json
-kh_compression_*.json
-kh_merge_progress_*.json
-kh_final_*.json
-infer_*.csv
+*.json
 
 # OS
 .DS_Store

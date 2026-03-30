@@ -1,0 +1,502 @@
+{
+  "source_file": "lyy_test.csv",
+  "total_cases": 62,
+  "cases": [
+    {
+      "index": 7,
+      "question": "一般纳税人有施工劳务资质可以开3个点劳务费发票吗？",
+      "answer": "需要联系专管员用电子合同增加税种",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 20,
+      "question": "超龄人员社保补缴",
+      "answer": "本人带身份证去税务局前台处理",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 34,
+      "question": "我公司有对外贸易，我是否要开外币账户，还是每次直接结汇",
+      "answer": "开外币账户比较好，开户是基础，是为了让资金“落袋为安”；是否结汇是选择，是为了让资金“更有价值”。",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 36,
+      "question": "专精特新和创小已经认定了，名号能保持多久",
+      "answer": "认定通过后有效期是3年",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 42,
+      "question": "办公设备租赁服务可以开租赁发票吗",
+      "answer": "办公设备租赁服务可以开具租赁发票。",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 43,
+      "question": "领取失业金的金额 是怎么算出来的",
+      "answer": "计算公式为：失业保险金领取金额 = 当地失业保险金月标准 × 失业保险金领取期限。",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 48,
+      "question": "需要在小红书上开店铺，想注册空新司挂链接。客户是做游艇租赁的，想做带一点点旅游性质，经营范围广的",
+      "answer": "参考同行经营范围",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 55,
+      "question": "要开3个点的差额发票",
+      "answer": "26年新的业务就没有差额了，小规模不存在差额说法了",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 65,
+      "question": "开xxx元的发票需要交多少税",
+      "answer": "增值税=含税÷（1+税率）*税率，附加税=增值税*12%，印花税=未税收入*万分之3，企业所得税=未税收入*5%",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 68,
+      "question": "“建筑施工企业综合类专职安全生产管理人员”这种证件怎么办",
+      "answer": "第一种：报名、培训、然后考试，我们可以帮忙整理材料报名，收服务费1000，客户需自己交报名费和培训费，然后自己考试（如果时间不足考试。等于陪跑）\n第二种：包过拿证，只要人去外省刷个脸，成本是7000，外省是河南或河北（建议稳定）\n第三种：直接拿证，成本12000，也是河南或河北（如果被查到，取消资格）",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 69,
+      "question": "个税按照多少缴纳",
+      "answer": "5000元以下免收税费 超过5001元-8000元3% 超过8001元-17000元10%超过17000元-30000元20%",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 71,
+      "question": "专票税务容易查，普票不容易查吗",
+      "answer": "真实业务就不会被核查",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 78,
+      "question": "实体K是什么，员工生产期间\n缴纳社保公司是否可以申请社保补贴\n",
+      "answer": "就是法人一证通，\n可以申请补贴",
+      "extra_info": "类型=咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 94,
+      "question": "企业每个月要缴纳那些税金",
+      "answer": "常见的税金增值税，个人所得税，企业所得税",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 100,
+      "question": "账户什么时候解限",
+      "answer": "一两个小时左右，如果当天上限会联系老板协商",
+      "extra_info": "类型=非咨询类",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 101,
+      "question": "江苏基本薪资是多少",
+      "answer": "一类地区 2660/月 25/小时 南京、苏州、无锡、常州、镇江等\n二类地区 2430/月 23/小时 南通、扬州、泰州、徐州（市区）等\n三类地区 2180/月 21/小时 连云港、淮安、盐城、宿迁等",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 105,
+      "question": "客户问公司水母报告是什么？",
+      "answer": "水母报告相当于一个企业的画像，可以反馈企业的营销情况；可以微信小程序关注水母报告，免费拉取一份数据。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 107,
+      "question": "名下有一个个人店铺，接到税务局电话说要补申报，实际销售额明显小于申报金额。怎么处理？",
+      "answer": "老板，您这几天方便过来一趟嘛？跟您详细讲一下个人店铺问题，以及后续挂奥倍德上去需要注意的事项，包括成本票怎么补。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 113,
+      "question": "老板主要询问了关于发放提成时的税务问题，包括是否需要公司扣税、个税起征点以及报税流程。他提到提成需要通过公账发放，这样要交多少税，然后以后收入可能有100万，这个怎么解决",
+      "answer": "我跟老板电话沟通了一下，先把银行流水做进账上，然后给他讲要这是公转私，需要提前规划，方便面谈",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 124,
+      "question": "新户专管是谁",
+      "answer": "联系告知",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 132,
+      "question": "提额怎样操作",
+      "answer": "联系专管操作",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 131,
+      "question": "购买车辆可以抵税吗",
+      "answer": "可以的",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 133,
+      "question": "安全员考试什么时候开始",
+      "answer": "已经报名成功的，3月中旬有考试",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 134,
+      "question": "跨省可以经营吗",
+      "answer": "可以的",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 141,
+      "question": "法人章 财务章  还有营业执照副本找不到了，可以补吗？",
+      "answer": "补刻公章  刻章社要登报的，我来问下价格\n或者您也可以去附近的刻章社  去补刻一个，补刻是收费的",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 154,
+      "question": "上海缴纳社保 昆山可以缴纳嘛",
+      "answer": "最好不要缴纳了",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 166,
+      "question": "我们的注册资本如果提高到3001万需要多长时间完成？",
+      "answer": "预计7个工作日可以搞完，拿到执照。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 195,
+      "question": "你好，不交社保的话，工资申报多少不用交个税呀",
+      "answer": "超过5k会产生个税",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 204,
+      "question": "我的公司我实缴最迟什么时候完成?",
+      "answer": "最迟要在2027年6月底之前完成实缴工作",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 208,
+      "question": "库存有剩多少",
+      "answer": "16893.53",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 210,
+      "question": "工资就差几分，还需要发放吗",
+      "answer": "不用",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 211,
+      "question": "为什么我的账户余额是有数据的，但是余额是显示是0",
+      "answer": "因为老板12月没有对账，所以对账完就可以了",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 213,
+      "question": "以前可以点开查看承兑的  现在不知道在哪里可以点开看信息了",
+      "answer": "持有票据查询（当前在手票据）\n插入经办 U 盾，登录工行企业网银。\n进入：票据业务 → 电子商业汇票（新一代） → 库存票据 / 持有票据查询。\n选择账号、票据类型、到期日范围，点击查询。\n点击票据号码，可查看票面正反面、状态、流转记录。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 215,
+      "question": "这个抬头还能开多少发票",
+      "answer": "小规模一季度普票不超30万免增值税，这个月的额度还能开18810.9",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 216,
+      "question": "你们方便能帮我查一下，就是我这个租赁费每个月我都要付钱，就是有的票有没有没开的票就是在你们那边儿。比如说，你看，我现在都交到27了，你看看你们账那边儿有没有缺的，每月都有，你看你们缺不缺，缺的话，我就让对方儿发一个。想方便让你们帮我查一下，看是不是每月都有。",
+      "answer": "正常开具发票税号无误的话是都会入账的",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 214,
+      "question": "我想问你一下，我给我开了十六万十六万普票，16万普票，这个税点怎么扣。他把钱转给我，怎么得扣多少？",
+      "answer": "增值税：0 元\n附加税：0 元\n个人所得税：560 元\n合计：560 元",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 218,
+      "question": "需要提供：24年，２５年财务报表（年报资产负债表 利润表）\n24年企业所得税年度申报表\n３.25年票明细（Excel表格）\n客户要登记供应商信息",
+      "answer": "已提供：24年-25年财务报表,24年企业所得税申报表和25年销项发票明细",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 222,
+      "question": "我问你一下，我那不是安徽池州有个一那个五金店嘛，他给我开了票，然后我现在还欠他多少钱？",
+      "answer": "我们一共收到池州开的发票247,600，目前已付款：120,000，刚打了5万，目前还有77,600没付款",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 223,
+      "question": "公司需要做股转，安排一下\n\n那是为什么？，我现在补税金进去就是相当于交之前的税，那之前的票冲红了，就相当于作废了，我税金缴了再开不了，那不是有冲突吗？税不是多交了吗？",
+      "answer": "目前从咱们账面上来看",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 225,
+      "question": "我还欠公司多少钱，帮忙看一下",
+      "answer": "目前欠公司：60035.74，需要把钱还给公司哈，或者开发票进来。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 226,
+      "question": "我这个月要开的多，需要确认一下我的进票，还够不够",
+      "answer": "截至到2月留底税金：3,790.31 ，还需要在开187,829.03的进项票进来，不然要交税了哦",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 227,
+      "question": "查下2025年的社保补缴了多少。去年社保是不是补交费了",
+      "answer": "2025年的社保1-9月份一补缴了459.72元，\n齐彪25年1-9月份补缴了229.86元；\n贾苗苗25年1-9月份补缴了229.86元；",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 229,
+      "question": "告诉我还有哪些客户欠我发票，我能取出多少款",
+      "answer": "需要先把银行提供给我们，我们录入后，跟您语音一对一核对银行往来",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 230,
+      "question": "告诉我还有哪些客户欠我发票",
+      "answer": "需要先把银行提供给我们，我们录入后，跟您语音一对一核对银行往来",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 235,
+      "question": "无票支出税务局真的认可吗，会不会涉及交税",
+      "answer": "求解",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 236,
+      "question": "你好，我那个工商年报营业额40万的话，纳税总额填0.1万没事吧",
+      "answer": "这个没事，根据实际的填写即可",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 237,
+      "question": "这个月最多可以开出多少票，进项后补",
+      "answer": "25年盈利9.5万，需要在今年5月底补齐发票；\n本月新开的105000元，需要在26年12月底之前补齐；",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 241,
+      "question": "这里面个人所得税，是指什么",
+      "answer": "指的是每月申报的人员工资",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 243,
+      "question": "有房子租给公司的合同模版没啊\n房子是个人的，我想租给公司签个租赁合同\n租期一般是几年啊，还有租金多少合适呢",
+      "answer": "这个要看是什么类型的房子，\n是个人住宅的话，可以算2500-3000元一个月，一年就是30000-36000元；\n是厂房的话，小的一年就是5-6万；\n大的厂房8-10万；\n门店的看实际租房的金额，大概上下浮动一下",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 247,
+      "question": "今年社保员工是缴纳多少",
+      "answer": "现在每月社保每人1738.2元，\n单位承担1,213.24元，个人承担524.96元，合计1738.2元。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 250,
+      "question": "需要一个地址注册公司",
+      "answer": "年付费地址，第1年2500，第二年1500，后面的金额都是1500/年\n一次性地址：1500",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 249,
+      "question": "帮我看一下需要交多少税金这个月",
+      "answer": "增值税及附加税费（一般纳税人适用）：21185.40元，其中：\n    增值税：19986.23元\n    城市维护建设费：699.52元\n    教育费附加：299.79元\n    地方教育费附加：199.86元\n个人所得税（代扣代缴）：0.00元\n——总计：21185.40元",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 254,
+      "question": "线下怎么咨询",
+      "answer": "人社大厅",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 258,
+      "question": "为设立银行基本户可以开票吗",
+      "answer": "发票可以开具",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 265,
+      "question": "这个月基本不开票了，帮我看下需要交多少税金",
+      "answer": "目前需要缴纳：增值税：160,625.62    附加税：19,275.07，需要在开价税合计：1,391,957.49的票进项票进来。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 266,
+      "question": "我们对外发票还能开多少金额",
+      "answer": "咱们这个季度已经开了6万出去了，再开30万的话季度就要超了，增值税：3564.36   附加税：427.72   印花税：352,871.64*0.0003=105.86   企业所得税：17,821.76",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 272,
+      "question": "我公司还能开多少票出去",
+      "answer": "目前咱们还可以开6-7万的发票出去",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 273,
+      "question": "税务局打电话说你们报的进出口数据对不上，相对应的数据我发邮箱给你",
+      "answer": "好的，核对到数据是一样的，需要您提供给您打电话的老师，我这边来咨询邮箱具体是什么问题。",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 275,
+      "question": "银行收到一笔昆山市医疗保障基金管理中心打款到公司账号，这个是什么",
+      "answer": "这个是生育津贴，之前您说",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 276,
+      "question": "2023-2025 年每年的财务审计报告、2023-2025 年研发费用专审、2025年度高新技术\n产品收入专审报告，提供这些资料多少钱",
+      "answer": "这个是属于需要提供审计报告，费用是15000元",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 296,
+      "question": "客户转入盘点定位黄金，一年费用合同金额10800，服务过程中两位负责人不愿意对接细节，导致信息错误",
+      "answer": "月专家上门处理，暂定降级白银",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    },
+    {
+      "index": 297,
+      "question": "客户年纪过大，后面公司考虑关停",
+      "answer": "转让或者注销，出方案",
+      "extra_info": "",
+      "reasoning": "",
+      "reason": "Level 1 未提炼出可泛化的 Know-How"
+    }
+  ]
+}

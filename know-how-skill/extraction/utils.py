@@ -73,4 +73,101 @@ def publish_to_knowledge(
         f.write(description)
     print(f"[Knowledge] 知识描述文件已生成: {md_path}")
 
+    append_knowhow_content_to_md(dst_json, md_path)
+
     return sub_dir
+
+
+# ─── Know-How 内容追加到 knowledge.md ─────────────────────────────────────────
+
+def _render_structured_kh(kh: dict) -> str:
+    """将 QA v2 的结构化 JSON know-how 渲染为可读文本。"""
+    lines = []
+    lines.append(f"### {kh.get('title', '未命名')}")
+    if kh.get("scope"):
+        lines.append(f"**适用场景**: {kh['scope']}")
+    lines.append("")
+
+    steps = kh.get("steps", [])
+    if steps:
+        lines.append("**操作步骤**:")
+        for s in steps:
+            line = f"  {s.get('step', '?')}. {s.get('action', '')}"
+            if s.get("condition"):
+                line += f" （条件: {s['condition']}）"
+            if s.get("outcome"):
+                line += f" → {s['outcome']}"
+            lines.append(line)
+        lines.append("")
+
+    exceptions = kh.get("exceptions", [])
+    if exceptions:
+        lines.append("**例外情况**:")
+        for ex in exceptions:
+            lines.append(f"  - 当 {ex.get('when', '?')} → {ex.get('then', '?')}")
+        lines.append("")
+
+    constraints = kh.get("constraints", [])
+    if constraints:
+        lines.append("**约束/依据**:")
+        for c in constraints:
+            lines.append(f"  - {c}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def append_knowhow_content_to_md(knowledge_json_path: str, knowledge_md_path: str):
+    """
+    读取 knowledge.json，将所有 know-how 内容转为文本追加到 knowledge.md 末尾，
+    并在最后添加总字数统计。
+
+    自动检测两种格式：
+      - Doc compression 格式: Final_Know_How (list[str])
+      - QA v2 结构化格式: know_how (dict with title/steps/...)
+    """
+    try:
+        with open(knowledge_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    kh_texts = []
+
+    for key in sorted(data.keys(), key=lambda x: int(x) if x.isdigit() else x):
+        entry = data[key]
+        if entry.get("status") != "success":
+            continue
+
+        # QA v2 结构化格式
+        if "know_how" in entry and isinstance(entry["know_how"], dict):
+            rendered = _render_structured_kh(entry["know_how"])
+            if rendered.strip():
+                kh_texts.append(rendered)
+
+        # Doc compression 格式
+        elif "Final_Know_How" in entry:
+            fkh = entry["Final_Know_How"]
+            if isinstance(fkh, str):
+                fkh = [fkh]
+            if isinstance(fkh, list):
+                for topic in fkh:
+                    topic = topic.strip()
+                    if topic:
+                        kh_texts.append(topic)
+
+    if not kh_texts:
+        return
+
+    total_content = "\n\n---\n\n".join(kh_texts)
+    total_chars = len(total_content)
+
+    with open(knowledge_md_path, "a", encoding="utf-8") as f:
+        f.write("\n\n---\n\n")
+        f.write("# Know-How 全文内容\n\n")
+        f.write(total_content)
+        f.write("\n\n---\n\n")
+        f.write(f"> **Know-How 总字数: {total_chars:,} 字 | 共 {len(kh_texts)} 条知识节点**\n")
+
+    print(f"[Knowledge] Know-How 全文已追加到 knowledge.md "
+          f"({len(kh_texts)} 条, {total_chars:,} 字)")
