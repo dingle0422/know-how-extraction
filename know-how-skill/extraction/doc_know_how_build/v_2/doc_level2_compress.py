@@ -76,12 +76,14 @@ def run_full_pipeline_for_doc(
 
     # ── Level 1: 按片段独立提炼 ──
     level1_file = os.path.join(output_dir, f"{source_stem}_level1_extraction.json")
+    structure_file = os.path.join(output_dir, f"{source_stem}_structure.json")
     print(f"\n  [Level 1] 按片段独立提炼: {os.path.basename(doc_path)}")
     run_doc_level1_extraction(
         doc_path=doc_path,
         llm_func=llm_func,
         prompt_func=level1_prompt_func,
         output_file=level1_file,
+        structure_file=structure_file,
         max_workers=level1_max_workers,
         max_retries=max_retries,
         min_seg_chars=min_seg_chars,

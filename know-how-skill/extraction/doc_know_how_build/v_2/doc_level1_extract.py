@@ -15,7 +15,9 @@ import os
 import sys
 import json
 import time
+import hashlib
 import traceback
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
@@ -65,20 +67,37 @@ def build_segment_tasks(
     max_seg_chars: int = 2000,
     force_llm_toc: bool = True,
     llm_toc_workers: int = 8,
-) -> tuple[list[dict], str, dict]:
+    structure_file: str = None,
+) -> tuple[list[dict], str, dict, dict]:
     """
     解析文档 → 合并段落 → 抽取目录 → 构建片段任务列表。
+
+    若 structure_file 已存在，直接加载（跳过解析和 TOC 抽取）；
+    否则执行完整解析，并将 DocStructure 保存到 structure_file。
 
     Returns
     -------
     tasks            : [{index, segment_idx, segment_text, toc_section, toc_level, keywords}]
     file_type        : 文档类型
     segment_content  : 合并后的 {序号: 文本}
+    doc_structure    : 完整的 DocStructure dict
     """
+    # ── 若 structure_file 已存在则直接加载 ──
+    if structure_file and os.path.exists(structure_file):
+        print(f"  [跳过] DocStructure 已存在，直接加载: {structure_file}")
+        with open(structure_file, "r", encoding="utf-8") as f:
+            doc_structure = json.load(f)
+        return _tasks_from_doc_structure(doc_structure), \
+            doc_structure["document_meta"]["file_type"], \
+            {p["idx"]: p["text"] for p in doc_structure["paragraphs"]}, \
+            doc_structure
+
+    # ── Step 1: 解析文档 ──
     print(f"  [解析] 解析文档原始内容...")
     full_text, segment_content, file_type = parse_document(doc_path)
     raw_count = len(segment_content)
 
+    # ── Step 2: 合并段落 ──
     if min_seg_chars > 0:
         print(f"  [合并] 按字数窗口合并段落（min={min_seg_chars}, max={max_seg_chars}）...")
         segment_content, full_text = merge_segments_by_length(
@@ -87,6 +106,7 @@ def build_segment_tasks(
     merged_count = len(segment_content)
     print(f"  文档类型: {file_type}, 原始段落: {raw_count}, 合并后: {merged_count}")
 
+    # ── Step 3: 目录抽取 + 关键词 ──
     print(f"  [目录] 抽取目录结构（用作片段上下文）...")
     toc_items = extract_toc(
         doc_path, full_text, segment_content, file_type,
@@ -94,12 +114,55 @@ def build_segment_tasks(
     )
     toc_items = extract_toc_keywords(toc_items, segment_content, llm_func)
 
+    # ── Step 4: 段落映射 ──
     paragraphs = build_paragraphs(segment_content, toc_items)
 
+    # ── 组装 DocStructure ──
+    doc_structure = {
+        "document_meta": {
+            "source_file": os.path.abspath(doc_path),
+            "file_name": os.path.basename(doc_path),
+            "file_type": file_type,
+            "raw_segments": raw_count,
+            "merged_segments": merged_count,
+            "parse_timestamp": datetime.now().isoformat(),
+            "content_hash": hashlib.md5(full_text.encode("utf-8")).hexdigest(),
+        },
+        "toc": toc_items,
+        "paragraphs": [
+            {
+                "idx": p["idx"],
+                "text": p["text"],
+                "toc_section": p["toc_section"],
+                "toc_level": p["toc_level"],
+            }
+            for p in paragraphs
+        ],
+        "parse_config": {
+            "min_seg_chars": min_seg_chars,
+            "max_seg_chars": max_seg_chars,
+            "force_llm_toc": force_llm_toc,
+        },
+    }
+
+    # ── 保存 DocStructure ──
+    if structure_file:
+        os.makedirs(os.path.dirname(structure_file) or ".", exist_ok=True)
+        with open(structure_file, "w", encoding="utf-8") as f:
+            json.dump(doc_structure, f, ensure_ascii=False, indent=2)
+        print(f"  [DocStructure] 已保存: {structure_file}")
+
+    tasks = _tasks_from_doc_structure(doc_structure)
+    return tasks, file_type, segment_content, doc_structure
+
+
+def _tasks_from_doc_structure(doc_structure: dict) -> list[dict]:
+    """从 DocStructure 构建片段任务列表。"""
+    toc_items = doc_structure.get("toc", [])
     toc_kw_map = {item["title"]: item.get("keywords", []) for item in toc_items}
 
     tasks = []
-    for i, para in enumerate(paragraphs):
+    for i, para in enumerate(doc_structure["paragraphs"]):
         tasks.append({
             "index": i,
             "segment_idx": para["idx"],
@@ -108,8 +171,7 @@ def build_segment_tasks(
             "toc_level": para["toc_level"],
             "keywords": toc_kw_map.get(para["toc_section"], []),
         })
-
-    return tasks, file_type, segment_content
+    return tasks
 
 
 # ─── 单片段处理（含重试） ─────────────────────────────────────────────────
@@ -210,6 +272,7 @@ def run_doc_level1_extraction(
     llm_func,
     prompt_func,
     output_file: str = "./output/doc_kh_level1.json",
+    structure_file: str = None,
     max_workers: int = None,
     max_retries: int = 100,
     min_seg_chars: int = 500,
@@ -229,6 +292,7 @@ def run_doc_level1_extraction(
     llm_func          : LLM 调用函数
     prompt_func       : 提炼 prompt 构造函数（如 doc_extract_v1）
     output_file       : JSON 输出路径（支持断点续传）
+    structure_file    : DocStructure JSON 保存路径（含 TOC / 段落映射等中间结果）
     max_workers       : 并发线程数（默认 CPU 核心数）
     max_retries       : 每片段最大重试次数
     min_seg_chars     : 段落合并下限
@@ -241,9 +305,9 @@ def run_doc_level1_extraction(
 
     print(f"[Doc-Level-1-v2] 开始处理: {os.path.basename(doc_path)}")
 
-    tasks, file_type, segment_content = build_segment_tasks(
+    tasks, file_type, segment_content, doc_structure = build_segment_tasks(
         doc_path, llm_func, min_seg_chars, max_seg_chars,
-        force_llm_toc, llm_toc_workers,
+        force_llm_toc, llm_toc_workers, structure_file,
     )
 
     total = len(tasks)
@@ -359,12 +423,14 @@ if __name__ == "__main__":
 
         source_stem = get_source_stem(doc_path)
         output_file = os.path.join(output_dir, f"{source_stem}_level1_extraction.json")
+        structure_file = os.path.join(output_dir, f"{source_stem}_structure.json")
 
         run_doc_level1_extraction(
             doc_path=doc_path,
             llm_func=chat,
             prompt_func=doc_extract_v1,
             output_file=output_file,
+            structure_file=structure_file,
             max_workers=os.cpu_count() or 4,
             max_retries=100,
         )
