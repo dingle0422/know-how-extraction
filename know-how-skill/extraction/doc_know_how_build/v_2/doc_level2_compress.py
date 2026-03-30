@@ -32,9 +32,12 @@ if _V1_DIR not in sys.path:
 if _EXTRACTION_DIR not in sys.path:
     sys.path.insert(0, _EXTRACTION_DIR)
 
-# v2 目录必须最后插入（位于 sys.path[0]），确保优先于 v1 的同名模块
-if _V_DIR not in sys.path:
-    sys.path.insert(0, _V_DIR)
+# v2 目录强制置于 sys.path[0]，确保优先于 v1 的同名模块 doc_level1_extract
+# 注意：直接运行脚本时 Python 会自动将脚本目录加入 sys.path，
+# 但上面的 insert(0, ...) 会将其他路径推到前面，所以必须 remove + re-insert。
+if _V_DIR in sys.path:
+    sys.path.remove(_V_DIR)
+sys.path.insert(0, _V_DIR)
 
 from doc_level1_extract import run_doc_level1_extraction, _SUPPORTED_DOC_EXTS
 from level2_compress import run_level2_compression
