@@ -30,7 +30,7 @@ def publish_to_knowledge(
         {knowledge_base_dir}/{source_stem}_knowledge/
             ├── knowledge.json       (最终抽取结果副本)
             ├── knowledge.md         (LLM 基于源文档头部生成的知识概述)
-            └── *_traceback.json     (一级抽取结果，含源数据回溯信息，可选)
+            └── knowledge_traceback.json     (一级抽取结果，含源数据回溯信息，可选)
 
     Parameters
     ----------
@@ -55,7 +55,7 @@ def publish_to_knowledge(
     print(f"[Knowledge] 最终结果已复制到: {dst_json}")
 
     if level1_json_path and os.path.exists(level1_json_path):
-        dst_traceback = os.path.join(sub_dir, f"{source_stem}_traceback.json")
+        dst_traceback = os.path.join(sub_dir, "knowledge_traceback.json")
         shutil.copy2(level1_json_path, dst_traceback)
         print(f"[Knowledge] 一级回溯文件已复制到: {dst_traceback}")
 
