@@ -40,6 +40,11 @@ try:
 except ImportError:
     Presentation = None
 
+_V_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_DIR = os.path.dirname(_V_DIR)
+_EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
+_SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
+
 try:
     from prompts import (
         safe_parse_json_with_llm_repair,
@@ -47,7 +52,7 @@ try:
         doc_toc_keywords_prompt,
     )
 except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, _SKILL_ROOT)
     from prompts import (
         safe_parse_json_with_llm_repair,
         doc_page_toc_summary_prompt,
@@ -892,46 +897,86 @@ def _print_summary(ds: dict):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  独立测试入口
+#  独立运行入口：支持指定文件 or 扫描 input 文件夹
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_SUPPORTED_DOC_EXTS = set(_PARSER_MAP.keys())
+
+
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    import argparse
+
+    sys.path.insert(0, _SKILL_ROOT)
     from llm_client import chat
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, _EXTRACTION_DIR)
     from utils import get_source_stem
 
-    print("=" * 60)
-    print("[doc_structure_parse] 开始独立测试")
-    print("=" * 60)
-
-    pdf_path = os.path.join(os.path.dirname(__file__), "input", "电商行业财税合规与实务指南.pdf")
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"测试文档未找到: {pdf_path}")
-
-    source_stem = get_source_stem(pdf_path)
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"{source_stem}_structure.json")
-
-    ds = run_doc_structure_parse(
-        doc_path=pdf_path,
-        llm_func=chat,
-        output_file=output_file,
+    parser = argparse.ArgumentParser(
+        description="文档结构化解析（Layer 0）"
     )
+    parser.add_argument(
+        "--files", "-f", nargs="+", default=None,
+        help="指定要处理的文档文件路径（支持多个）；不指定则处理 input 目录下所有文件",
+    )
+    args = parser.parse_args()
 
-    print("\n目录结构预览:")
-    for item in ds["toc"][:15]:
-        indent = "  " * item["level"]
-        kw = ", ".join(item.get("keywords", []))
-        print(f"  {indent}[L{item['level']}] {item['title']}  "
-              f"(seg {item['start_seg']}~{item['end_seg']})  关键词: {kw}")
+    input_dir = os.path.join(_PACKAGE_DIR, "input")
+    output_dir = os.path.join(_PACKAGE_DIR, "output")
+    os.makedirs(output_dir, exist_ok=True)
 
-    section_counts = defaultdict(int)
-    for p in ds["paragraphs"]:
-        section_counts[p["toc_section"]] += 1
-    print(f"\n各目录节段落数分布（前 10 个）:")
-    for title, cnt in list(section_counts.items())[:10]:
-        print(f"  {title}: {cnt} 段")
+    if args.files:
+        doc_files = []
+        for fp in args.files:
+            fp = os.path.abspath(fp)
+            if not os.path.isfile(fp):
+                print(f"[警告] 文件不存在，已跳过: {fp}")
+                continue
+            if os.path.splitext(fp)[1].lower() not in _SUPPORTED_DOC_EXTS:
+                print(f"[警告] 不支持的文件类型，已跳过: {fp}（支持: {_SUPPORTED_DOC_EXTS}）")
+                continue
+            doc_files.append(fp)
+        if not doc_files:
+            raise FileNotFoundError("指定的文件中没有可处理的有效文件")
+        mode_desc = "指定文件模式"
+    else:
+        doc_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if os.path.splitext(f)[1].lower() in _SUPPORTED_DOC_EXTS
+        ])
+        if not doc_files:
+            raise FileNotFoundError(
+                f"input 目录中未找到支持的文档文件（{_SUPPORTED_DOC_EXTS}）：{input_dir}"
+            )
+        mode_desc = "全量扫描模式"
 
-    print(f"\n[doc_structure_parse] 测试完成！")
+    print("=" * 60)
+    print(f"[doc_structure_parse] {mode_desc}，共 {len(doc_files)} 个源文档（仅结构化解析）")
+    print("=" * 60)
+    for i, fp in enumerate(doc_files, 1):
+        print(f"  {i}. {os.path.basename(fp)}")
+
+    for idx, doc_path in enumerate(doc_files, 1):
+        print(f"\n{'═' * 60}")
+        print(f"  [{idx}/{len(doc_files)}] 处理: {os.path.basename(doc_path)}")
+        print(f"{'═' * 60}")
+
+        source_stem = get_source_stem(doc_path)
+        output_file = os.path.join(output_dir, f"{source_stem}_structure.json")
+
+        ds = run_doc_structure_parse(
+            doc_path=doc_path,
+            llm_func=chat,
+            output_file=output_file,
+        )
+
+        print(f"\n  目录结构预览（前 15 条）:")
+        for item in ds["toc"][:15]:
+            indent = "  " * item["level"]
+            kw = ", ".join(item.get("keywords", []))
+            print(f"    {indent}[L{item['level']}] {item['title']}  "
+                  f"(seg {item['start_seg']}~{item['end_seg']})  关键词: {kw}")
+
+    print(f"\n{'═' * 60}")
+    print(f"[doc_structure_parse] 全部 {len(doc_files)} 个文档处理完成！")
+    print(f"{'═' * 60}")

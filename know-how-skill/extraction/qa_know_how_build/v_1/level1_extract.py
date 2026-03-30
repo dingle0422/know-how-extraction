@@ -13,10 +13,15 @@ from threading import Lock
 
 import pandas as pd
 
+_V_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_DIR = os.path.dirname(_V_DIR)
+_EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
+_SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
+
 try:
     from prompts import safe_parse_json_with_llm_repair
 except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, _SKILL_ROOT)
     from prompts import safe_parse_json_with_llm_repair
 
 file_lock = Lock()
@@ -178,71 +183,118 @@ def run_level1_extraction(
     return output_file
 
 
+_SUPPORTED_QA_EXTS = {".csv", ".xlsx", ".xls"}
+
+
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import argparse
+
+    sys.path.insert(0, _SKILL_ROOT)
+    sys.path.insert(0, _EXTRACTION_DIR)
     from utils import get_source_stem
     from llm_client import chat
     from prompts import single_v1
 
-    print("=" * 60)
-    print("[level1_extract] 开始独立测试（真实 LLM 调用）")
-    print("=" * 60)
-
-    source_file = os.path.join(os.path.dirname(__file__), "input", "jkyw_train_324.csv")
-    source_stem = get_source_stem(source_file)
-
-    test_df = pd.DataFrame(
-        {
-            "question": [
-                "合同签订需要注意什么?",
-                "增值税发票如何认证?",
-                "企业所得税汇算清缴截止日期是?",
-            ],
-            "reasoning": [
-                "合同签订涉及民法典合同编相关规定，需要关注主体资格、条款合法性及签章要求。",
-                "增值税发票认证目前主要通过增值税发票综合服务平台进行勾选确认操作。",
-                "根据企业所得税法规定，汇算清缴应在纳税年度终了之日起五个月内完成。",
-            ],
-            "answer": [
-                "需双方签字盖章，条款合法合规。",
-                "登录增值税发票综合服务平台进行勾选认证。",
-                "次年5月31日前完成汇算清缴。",
-            ],
-            "Extra_Information": ["借款业务", "借款业务", "借款业务"],
-        }
+    parser = argparse.ArgumentParser(
+        description="QA 一级知识提炼（Level 1）"
     )
+    parser.add_argument(
+        "--files", "-f", nargs="+", default=None,
+        help="指定要处理的 QA 源数据文件路径（支持多个）；不指定则处理 input 目录下所有文件",
+    )
+    args = parser.parse_args()
 
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    input_dir = os.path.join(_PACKAGE_DIR, "input")
+    output_dir = os.path.join(_PACKAGE_DIR, "output")
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"{source_stem}_level1_extraction.json")
-    if os.path.exists(output_file):
-        os.remove(output_file)
 
-    result = run_level1_extraction(
-        data_train=test_df,
-        llm_func=chat,
-        prompt_func=single_v1,
-        output_file=output_file,
-        max_workers=2,
-        max_retries=3,
-    )
+    if args.files:
+        source_files = []
+        for fp in args.files:
+            fp = os.path.abspath(fp)
+            if not os.path.isfile(fp):
+                print(f"[警告] 文件不存在，已跳过: {fp}")
+                continue
+            if os.path.splitext(fp)[1].lower() not in _SUPPORTED_QA_EXTS:
+                print(f"[警告] 不支持的文件类型，已跳过: {fp}（支持: {_SUPPORTED_QA_EXTS}）")
+                continue
+            source_files.append(fp)
+        if not source_files:
+            raise FileNotFoundError("指定的文件中没有可处理的有效文件")
+        mode_desc = "指定文件模式"
+    else:
+        source_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if os.path.splitext(f)[1].lower() in _SUPPORTED_QA_EXTS
+        ])
+        if not source_files:
+            raise FileNotFoundError(
+                f"input 目录中未找到支持的数据文件（{_SUPPORTED_QA_EXTS}）：{input_dir}"
+            )
+        mode_desc = "全量扫描模式"
 
-    with open(result, encoding="utf-8") as f:
-        data = json.load(f)
+    print("=" * 60)
+    print(f"[level1_extract] {mode_desc}，共 {len(source_files)} 个源数据文件（仅一级提炼）")
+    print("=" * 60)
+    for i, fp in enumerate(source_files, 1):
+        print(f"  {i}. {os.path.basename(fp)}")
 
-    print(f"\n测试结果预览（共 {len(data)} 条）:")
-    for k, v in sorted(data.items(), key=lambda x: int(x[0])):
-        status = v.get("status")
-        kh_preview = str(v.get("Know_How", ""))[:60]
-        print(f"  [{k}] status={status} | Know_How: {kh_preview}...")
+    for idx, source_file in enumerate(source_files, 1):
+        print(f"\n{'═' * 60}")
+        print(f"  [{idx}/{len(source_files)}] 处理: {os.path.basename(source_file)}")
+        print(f"{'═' * 60}")
 
-    md_file = output_file.replace(".json", ".md")
-    with open(md_file, "w", encoding="utf-8") as f:
-        for k, v in sorted(data.items(), key=lambda x: int(x[0])):
-            kh = v.get("Know_How", "").strip()
-            if kh:
-                f.write(kh)
-                f.write("\n\n---\n\n")
-    print(f"\nMarkdown 预览文件已导出：{md_file}")
+        source_stem = get_source_stem(source_file)
+        ext = os.path.splitext(source_file)[1].lower()
+        if ext == ".csv":
+            data_train = pd.read_csv(source_file, encoding="utf-8-sig")
+        else:
+            data_train = pd.read_excel(source_file, sheet_name=0)
 
-    print("\n[level1_extract] 测试完成！")
+        required_cols = {"question", "answer"}
+        missing = required_cols - set(data_train.columns)
+        if missing:
+            print(f"  [跳过] 缺少必需列: {missing}")
+            continue
+
+        if "reasoning" not in data_train.columns:
+            data_train["reasoning"] = ""
+            print(f"  提示: 源文件中不含 reasoning 列，已自动创建并置空")
+
+        core_cols = {"question", "reasoning", "answer"}
+        if "Extra_Information" not in data_train.columns:
+            extra_cols = [c for c in data_train.columns if c not in core_cols]
+            if extra_cols:
+                data_train["Extra_Information"] = data_train[extra_cols].apply(
+                    lambda row: "; ".join(f"{k}={v}" for k, v in row.items() if pd.notna(v)),
+                    axis=1,
+                )
+            else:
+                data_train["Extra_Information"] = ""
+        print(f"  数据加载完成: {len(data_train)} 条记录")
+
+        output_file = os.path.join(output_dir, f"{source_stem}_level1_extraction.json")
+        run_level1_extraction(
+            data_train=data_train,
+            llm_func=chat,
+            prompt_func=single_v1,
+            output_file=output_file,
+            max_workers=os.cpu_count() or 4,
+            max_retries=100,
+        )
+
+        with open(output_file, encoding="utf-8") as f:
+            data = json.load(f)
+        md_file = output_file.replace(".json", ".md")
+        with open(md_file, "w", encoding="utf-8") as f:
+            for k, v in sorted(data.items(), key=lambda x: int(x[0])):
+                kh = v.get("Know_How", "").strip()
+                if kh:
+                    f.write(kh)
+                    f.write("\n\n---\n\n")
+        print(f"  Markdown 预览文件已导出: {md_file}")
+
+    print(f"\n{'═' * 60}")
+    print(f"[level1_extract] 全部 {len(source_files)} 个数据文件处理完成！")
+    print(f"{'═' * 60}")

@@ -26,10 +26,15 @@ try:
 except ImportError:
     pdfplumber = None
 
+_V_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_DIR = os.path.dirname(_V_DIR)
+_EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
+_SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
+
 try:
     from prompts import safe_parse_json_with_llm_repair
 except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, _SKILL_ROOT)
     from prompts import safe_parse_json_with_llm_repair
 
 file_lock = Lock()
@@ -406,7 +411,7 @@ def run_full_pipeline_for_doc(
     若中间产物已存在，自动跳过对应阶段（断点续传由各子函数内部处理）。
     """
     from doc_structure_parse import run_doc_structure_parse, parse_document
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, _EXTRACTION_DIR)
     from utils import get_source_stem, publish_to_knowledge
 
     source_stem = get_source_stem(doc_path)
@@ -475,30 +480,56 @@ def run_full_pipeline_for_doc(
     return output_file
 
 
-# ─── 独立运行入口：扫描 input 文件夹全部源文件 ──────────────────────────────
+# ─── 独立运行入口：支持指定文件 or 扫描 input 文件夹 ────────────────────────
 
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    import argparse
+
+    sys.path.insert(0, _SKILL_ROOT)
     from llm_client import chat
     from prompts import doc_extract_v1
 
-    input_dir = os.path.join(os.path.dirname(__file__), "input")
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
-    knowledge_dir = os.path.join(os.path.dirname(__file__), "knowledge")
+    parser = argparse.ArgumentParser(
+        description="文档知识抽取流水线（Layer 0 → Layer 1 → Knowledge）"
+    )
+    parser.add_argument(
+        "--files", "-f", nargs="+", default=None,
+        help="指定要处理的文档文件路径（支持多个）；不指定则处理 input 目录下所有文件",
+    )
+    args = parser.parse_args()
 
-    doc_files = sorted([
-        os.path.join(input_dir, f)
-        for f in os.listdir(input_dir)
-        if os.path.splitext(f)[1].lower() in _SUPPORTED_DOC_EXTS
-    ])
+    input_dir = os.path.join(_PACKAGE_DIR, "input")
+    output_dir = os.path.join(_PACKAGE_DIR, "output")
+    knowledge_dir = os.path.join(_PACKAGE_DIR, "knowledge")
 
-    if not doc_files:
-        raise FileNotFoundError(
-            f"input 目录中未找到支持的文档文件（{_SUPPORTED_DOC_EXTS}）：{input_dir}"
-        )
+    if args.files:
+        doc_files = []
+        for fp in args.files:
+            fp = os.path.abspath(fp)
+            if not os.path.isfile(fp):
+                print(f"[警告] 文件不存在，已跳过: {fp}")
+                continue
+            if os.path.splitext(fp)[1].lower() not in _SUPPORTED_DOC_EXTS:
+                print(f"[警告] 不支持的文件类型，已跳过: {fp}（支持: {_SUPPORTED_DOC_EXTS}）")
+                continue
+            doc_files.append(fp)
+        if not doc_files:
+            raise FileNotFoundError("指定的文件中没有可处理的有效文件")
+        mode_desc = "指定文件模式"
+    else:
+        doc_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if os.path.splitext(f)[1].lower() in _SUPPORTED_DOC_EXTS
+        ])
+        if not doc_files:
+            raise FileNotFoundError(
+                f"input 目录中未找到支持的文档文件（{_SUPPORTED_DOC_EXTS}）：{input_dir}"
+            )
+        mode_desc = "全量扫描模式"
 
     print("=" * 60)
-    print(f"[doc_level1_extract] 扫描到 {len(doc_files)} 个源文档，开始批量流水线")
+    print(f"[doc_level1_extract] {mode_desc}，共 {len(doc_files)} 个源文档")
     print("=" * 60)
     for i, fp in enumerate(doc_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")

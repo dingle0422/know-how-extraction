@@ -12,10 +12,15 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+_V_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_DIR = os.path.dirname(_V_DIR)
+_EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
+_SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
+
 try:
     from prompts import safe_parse_json_with_llm_repair
 except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, _SKILL_ROOT)
     from prompts import safe_parse_json_with_llm_repair
 
 try:
@@ -400,7 +405,7 @@ def run_full_pipeline_for_qa(
     """
     import pandas as pd
     from level1_extract import run_level1_extraction
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, _EXTRACTION_DIR)
     from utils import get_source_stem, publish_to_knowledge
 
     source_stem = get_source_stem(source_file)
@@ -513,30 +518,56 @@ def run_full_pipeline_for_qa(
     return level2_file
 
 
-# ─── 独立运行入口：扫描 input 文件夹全部源数据 ──────────────────────────────
+# ─── 独立运行入口：支持指定文件 or 扫描 input 文件夹 ────────────────────────
 
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    import argparse
+
+    sys.path.insert(0, _SKILL_ROOT)
     from llm_client import chat
     from prompts import single_v1, compression_v2
 
-    input_dir = os.path.join(os.path.dirname(__file__), "input")
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
-    knowledge_dir = os.path.join(os.path.dirname(__file__), "knowledge")
+    parser = argparse.ArgumentParser(
+        description="QA 知识抽取流水线（Level 1 → Level 2 → Knowledge）"
+    )
+    parser.add_argument(
+        "--files", "-f", nargs="+", default=None,
+        help="指定要处理的源数据文件路径（支持多个）；不指定则处理 input 目录下所有文件",
+    )
+    args = parser.parse_args()
 
-    source_files = sorted([
-        os.path.join(input_dir, f)
-        for f in os.listdir(input_dir)
-        if os.path.splitext(f)[1].lower() in _SUPPORTED_QA_EXTS
-    ])
+    input_dir = os.path.join(_PACKAGE_DIR, "input")
+    output_dir = os.path.join(_PACKAGE_DIR, "output")
+    knowledge_dir = os.path.join(_PACKAGE_DIR, "knowledge")
 
-    if not source_files:
-        raise FileNotFoundError(
-            f"input 目录中未找到支持的数据文件（{_SUPPORTED_QA_EXTS}）：{input_dir}"
-        )
+    if args.files:
+        source_files = []
+        for fp in args.files:
+            fp = os.path.abspath(fp)
+            if not os.path.isfile(fp):
+                print(f"[警告] 文件不存在，已跳过: {fp}")
+                continue
+            if os.path.splitext(fp)[1].lower() not in _SUPPORTED_QA_EXTS:
+                print(f"[警告] 不支持的文件类型，已跳过: {fp}（支持: {_SUPPORTED_QA_EXTS}）")
+                continue
+            source_files.append(fp)
+        if not source_files:
+            raise FileNotFoundError("指定的文件中没有可处理的有效文件")
+        mode_desc = "指定文件模式"
+    else:
+        source_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if os.path.splitext(f)[1].lower() in _SUPPORTED_QA_EXTS
+        ])
+        if not source_files:
+            raise FileNotFoundError(
+                f"input 目录中未找到支持的数据文件（{_SUPPORTED_QA_EXTS}）：{input_dir}"
+            )
+        mode_desc = "全量扫描模式"
 
     print("=" * 60)
-    print(f"[level2_compress] 扫描到 {len(source_files)} 个源数据文件，开始批量流水线")
+    print(f"[level2_compress] {mode_desc}，共 {len(source_files)} 个源数据文件")
     print("=" * 60)
     for i, fp in enumerate(source_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")
