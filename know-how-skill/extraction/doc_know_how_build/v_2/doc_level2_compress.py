@@ -18,8 +18,6 @@ _PACKAGE_DIR = os.path.dirname(_V_DIR)
 _EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
 _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 
-if _V_DIR not in sys.path:
-    sys.path.insert(0, _V_DIR)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
@@ -31,11 +29,16 @@ _V1_DIR = os.path.join(_PACKAGE_DIR, "v_1")
 if _V1_DIR not in sys.path:
     sys.path.insert(0, _V1_DIR)
 
+if _EXTRACTION_DIR not in sys.path:
+    sys.path.insert(0, _EXTRACTION_DIR)
+
+# v2 目录必须最后插入（位于 sys.path[0]），确保优先于 v1 的同名模块
+if _V_DIR not in sys.path:
+    sys.path.insert(0, _V_DIR)
+
 from doc_level1_extract import run_doc_level1_extraction, _SUPPORTED_DOC_EXTS
 from level2_compress import run_level2_compression
 from doc_structure_parse import parse_document
-
-sys.path.insert(0, _EXTRACTION_DIR)
 from utils import get_source_stem, publish_to_knowledge
 
 
