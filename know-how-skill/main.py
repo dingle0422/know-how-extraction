@@ -44,6 +44,19 @@ DOMAIN_TAG = "债权融资"
 # 并发数
 MAX_WORKERS = 16
 
+# ─── 推理阶段配置 ────────────────────────────────────────────────────────────
+
+# 指定参与推理的 knowledge 目录列表（QA / Doc 可混合）
+KNOWLEDGE_DIRS: list[str] = [
+    # 示例:
+    # os.path.join(BASE_DIR, "extraction", "qa_know_how_build", "knowledge", "xxx_knowledge"),
+    # os.path.join(BASE_DIR, "extraction", "doc_know_how_build", "knowledge", "yyy_knowledge"),
+]
+
+# 检索 Top-N 参数
+TFIDF_TOP_N = 5
+EMBEDDING_TOP_N = 5
+
 
 def run_extraction():
     """提炼阶段：一级 → 二级 → 三级"""
@@ -119,37 +132,56 @@ def run_extraction():
 
 
 def run_inference():
-    """推理阶段：MapReduce 推理测试"""
+    """推理阶段：4 阶段 MapReduce 知识推理"""
     from llm_client import chat, qwen
-    from prompts_infer import infer_v1, summary_v0, potential_pitfalls
-    from inference.mapreduce_infer import run_mapreduce_inference
+    from prompts_infer import infer_v1, summary_v0, potential_pitfalls, edge_case_fallback_v0
+    from inference.mapreduce_infer import run_mapreduce_inference_file
 
     print("=" * 60)
-    print("  推理阶段：MapReduce 知识推理")
+    print("  推理阶段：MapReduce 知识推理（v2 四阶段）")
     print("=" * 60)
-
-    kh_source = LEVEL2_OUTPUT
-    if not os.path.exists(kh_source):
-        print(f"[!] 未找到知识库文件 {kh_source}，请先运行提炼阶段。")
-        return
 
     if not os.path.exists(TEST_CSV):
         print(f"[!] 未找到测试集文件 {TEST_CSV}，请先运行提炼阶段或手动准备。")
         return
 
-    run_mapreduce_inference(
-        kh_json_path=kh_source,
-        test_csv_path=TEST_CSV,
-        output_csv_path=INFER_OUTPUT,
+    # 指定参与推理的 knowledge 目录列表（按需修改）
+    knowledge_dirs = KNOWLEDGE_DIRS
+    if not knowledge_dirs:
+        print("[!] 未配置 knowledge 目录列表，请在 KNOWLEDGE_DIRS 中指定。")
+        return
+
+    missing = [d for d in knowledge_dirs if not os.path.isdir(d)]
+    if missing:
+        print(f"[!] 以下 knowledge 目录不存在: {missing}")
+        return
+
+    embedding_func = None
+    try:
+        from utils import get_embeddings
+        embedding_func = get_embeddings
+        print("[Infer] Dense Embedding 服务已加载")
+    except Exception as e:
+        print(f"[Infer] Dense Embedding 不可用（仅使用 TF-IDF）: {e}")
+
+    run_mapreduce_inference_file(
+        knowledge_dirs=knowledge_dirs,
+        input_path=TEST_CSV,
+        output_path=INFER_OUTPUT,
         map_llm_func=chat,
         reduce_llm_func=chat,
         infer_prompt_func=infer_v1,
         summary_prompt_func=summary_v0,
+        edge_case_prompt_func=edge_case_fallback_v0,
         pitfalls_func=potential_pitfalls,
         extra_llm_func=chat,
         extra_vendor="volc",
         extra_model="deepseek-v3.2",
-        max_workers=MAX_WORKERS,
+        embedding_func=embedding_func,
+        tfidf_top_n=TFIDF_TOP_N,
+        embedding_top_n=EMBEDDING_TOP_N,
+        map_max_workers=MAX_WORKERS,
+        enable_edge_case_fallback=True,
     )
 
     print("\n推理阶段全部完成！")

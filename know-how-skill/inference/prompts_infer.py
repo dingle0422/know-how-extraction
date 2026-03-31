@@ -140,6 +140,54 @@ def summary_v0(q, e, answers):
 }}"""
 
 
+def edge_case_fallback_v0(q, edge_cases_text):
+    return f"""# Role
+你是一个极度严谨的"智能推理判别节点"。在并发推理网络中，你的核心任务是基于【参考案例素材】来评估是否能回答【用户问题】。
+
+# Background
+上一轮推理中，一条结构化 Know-How 被判定为与用户问题不相关。但该 Know-How 所属的聚类中，存在一些未被结构化吸收的原始 QA 样本（边缘案例）——它们可能包含与用户问题直接相关的具体知识。
+
+现在，你需要仔细审查这些边缘案例，判断其中是否包含可用于回答用户问题的信息。
+
+# Objective
+1. **相关性检查**: 逐一审查 `<Edge_Case_References>` 中的参考案例，找出与 `<User_Question>` 相关的案例。
+2. **信息提取**: 如果发现相关案例，基于案例中的信息推导答案。
+3. **二元分支**:
+   - **分支 A（有效）**: 存在相关案例且能推导出有价值的答案 → Match_Status = "YES"
+   - **分支 B（无效）**: 所有案例均不相关或无法推导答案 → Match_Status = "NO"
+
+# Strict Constraints
+1. **仅基于提供的案例素材**: 不可使用预训练知识补充未在案例中出现的信息。
+2. **避免强行关联**: 如果案例与问题仅有表面关联但核心内容不匹配，应判定为无效。
+3. **宁缺毋滥**: 不确定时选择拒答，不要勉强编造答案。
+
+# Input Data
+<User_Question>
+{q}
+</User_Question>
+
+<Edge_Case_References>
+{edge_cases_text}
+</Edge_Case_References>
+
+# Workflow
+1. **理解问题**: 分析用户问题的核心诉求。
+2. **逐案审查**: 检查每个参考案例是否与问题直接相关。
+3. **信息整合**: 如果存在相关案例，提取其中可用于回答的关键信息。
+4. **裁决输出**: 判定有效或无效。
+
+# Output Format
+请严格按照以下 JSON 格式输出！不要包含额外的 Markdown 标记。
+
+{{
+  "Match_Status": "YES",
+  "Rejection_Reason": "",
+  "Reasoning_Chain": "在参考案例X中发现与用户问题直接相关的信息...",
+  "Derived_Answer": "根据参考案例，针对您的问题..."
+}}
+// 注意：如果判定为无效，则 Match_Status 为 "NO"，Reasoning_Chain 和 Derived_Answer 为空字符串。"""
+
+
 def potential_pitfalls():
     return """[
     {{

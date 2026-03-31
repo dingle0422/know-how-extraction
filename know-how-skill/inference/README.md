@@ -147,3 +147,20 @@
 | `map_max_workers` | Map 阶段并发线程数 | 4 |
 | `reduce_llm_func` | Reduce 阶段使用的 LLM | 同 Map |
 | `enable_edge_case_fallback` | 是否启用边缘案例兜底 | True |
+
+
+
+# 输出新增列
+| 新增列                   | 阶段      | 说明                                  |
+|------------------------|----------|-------------------------------------|
+| Retrieval_Candidates   | Phase 1  | 检索到的候选知识块数量                  |
+| Map_Total_Evaluated    | Phase 2  | 实际评估的知识块数量                    |
+| Map_Match_Count        | Phase 2  | 判定有效的知识块数量                    |
+| Edge_Fallback_Count    | Phase 3  | 边缘案例兜底尝试数                      |
+| Edge_Fallback_Match    | Phase 3  | 兜底成功数                              |
+| Total_Valid_Count      | 汇总      | 最终有效推理结果总数                     |
+| Map_Valid_Details      | Phase 2+3| 所有有效推理中间结果（JSON）             |
+| Map_Rejected_Reasons   | Phase 2  | 被拒绝的原因列表                        |
+| Extra_Information      | Phase 4  | 额外参考信息                            |
+| Reduce_Analysis        | Phase 4  | Reduce 融合分析                         |
+| Final_Inference_Answer | Phase 4  | 最终推理答案                            |
