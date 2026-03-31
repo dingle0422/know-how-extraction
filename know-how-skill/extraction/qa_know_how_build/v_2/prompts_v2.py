@@ -1,6 +1,8 @@
 """
-V2 Prompts：结构化 Know-How 生成 / 推理验证 / 最小改动更新。
+V2 Prompts：结构化 Know-How 生成 / 推理验证 / 结构化补丁更新。
 """
+
+import json as _json
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Know-How JSON Schema（供 prompt 内联引用）
@@ -196,31 +198,82 @@ def kh_inference_validate(know_how_json: str, question: str, answer: str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Prompt 3: 最小改动更新（partial match 时增量修补 Know-How）
+#  Prompt 3: 结构化补丁更新（partial match 时输出操作指令，由代码端执行）
 # ═══════════════════════════════════════════════════════════════════════════════
+
+PATCH_OPS_SCHEMA = """
+## 操作类型清单
+
+### Steps 操作
+1. **add_step** — 插入新步骤
+   {"op": "add_step", "after": "<step_id 或 null 表示插到开头>", "new_step": {"step": "...", "action": "...", "condition": "...|null", "outcome": "...|null"}}
+
+2. **modify_step** — 修改已有步骤的部分字段（只传需要改的字段；若需重命名步骤编号，在 updates 中包含 "step" 字段）
+   {"op": "modify_step", "target": "<step_id>", "updates": {"action?": "...", "condition?": "...", "outcome?": "...", "step?": "<new_label>"}}
+
+3. **remove_step** — 删除步骤（仅当该步骤被证明错误/多余时使用，极少见）
+   {"op": "remove_step", "target": "<step_id>"}
+
+### Exceptions 操作
+4. **add_exception** — 追加新的例外情况
+   {"op": "add_exception", "exception": {"when": "...", "then": "..."}}
+
+5. **modify_exception** — 修改已有例外（通过 0-based 索引定位）
+   {"op": "modify_exception", "index": 0, "updates": {"when?": "...", "then?": "..."}}
+
+6. **remove_exception** — 删除例外（仅当该例外被证明不成立时使用）
+   {"op": "remove_exception", "index": 0}
+
+### Constraints 操作
+7. **add_constraint** — 追加新约束/依据
+   {"op": "add_constraint", "constraint": "..."}
+
+8. **modify_constraint** — 修改已有约束（通过 0-based 索引定位）
+   {"op": "modify_constraint", "index": 0, "new_value": "..."}
+
+9. **remove_constraint** — 删除约束
+   {"op": "remove_constraint", "index": 0}
+
+### 顶层字段操作
+10. **update_scope** — 修改适用范围
+    {"op": "update_scope", "new_scope": "..."}
+
+11. **update_title** — 修改标题（最低优先级，仅在其他操作都无法覆盖时使用）
+    {"op": "update_title", "new_title": "..."}
+"""
+
 
 def kh_minimal_update(know_how_json: str, question: str, answer: str,
                       mismatch_analysis: str, extra_info: str = "") -> str:
     readable = _render_know_how_readable(know_how_json)
     return f"""# Role
-你是一个精密的「知识增量更新引擎」。你的任务是对一份已有的结构化 Know-How 进行**最小改动**，使其能够覆盖一个新的业务样本。
+你是一个精密的「知识增量补丁引擎」。你的任务是针对一份已有的结构化 Know-How，输出一组**结构化操作指令**（patch），由程序端精确执行。
 
-# Objective
-根据 <Mismatch_Analysis> 指出的缺失点，对 <Current_Know_How> 进行精准补充。
-- **最小改动原则**：只修改/新增必要的内容，不动已经正确的部分。
-- **结构保持**：输出必须严格遵循原有的 JSON Schema 结构。
-- **泛化原则**：新增内容仍应向上抽象为通用规则，不要就事论事地复述样本细节。
+# 核心原则
+- **最小改动**：只输出必要的操作，不动已经正确的部分。你不需要输出完整的 Know-How，只需要输出改动操作。
+- **泛化抽象**：新增内容应向上抽象为通用规则，不要就事论事地复述样本细节。
+- **操作按顺序执行**：operations 数组中的操作将按顺序依次执行。如果前一个操作重命名了某个 step（如 "2" → "2a"），后续操作应引用新名称 "2a"。
+- **分叉组合**：若需从已有步骤分叉，请组合使用 modify_step（重命名原步骤并标注条件）+ add_step（插入新分支步骤）。
 
-# Allowed Operations (按优先级)
-1. 在 steps 中插入新步骤，或在现有步骤中补充 condition/outcome
-2. **从已有步骤分叉**：若新样本揭示了一条不同的处理路径，在分叉点用子标签新建分支（如在 step "2" 处拆分为 "2a" 原路径 + "2b" 新路径），并为后续步骤延续分支标签
-3. 在 exceptions 中追加新的例外情况
-4. 在 constraints 中追加新的约束/依据
-5. 微调 scope 以扩大/缩小适用范围
-6. 仅在上述操作都无法覆盖时，才考虑修改 title
+# 操作指令规范
+{PATCH_OPS_SCHEMA}
 
-# Target JSON Schema
-{KH_JSON_SCHEMA}
+# 操作优先级（优先使用排在前面的操作）
+1. add_step / modify_step（补充步骤或完善已有步骤的条件/结果）
+2. add_exception（追加例外）
+3. add_constraint（追加约束/依据）
+4. update_scope（调整适用范围）
+5. update_title（调整标题，仅在极少数情况下使用）
+6. remove 类操作（极少使用，仅当有明确证据表明现有内容错误时）
+
+# 分叉示例
+若需将 step "2" 拆分为两条路径：
+```json
+[
+  {{"op": "modify_step", "target": "2", "updates": {{"step": "2a", "condition": "当满足条件A时"}}}},
+  {{"op": "add_step", "after": "2a", "new_step": {{"step": "2b", "action": "分支B的操作", "condition": "当满足条件B时", "outcome": null}}}}
+]
+```
 
 # Input Data
 
@@ -229,7 +282,7 @@ def kh_minimal_update(know_how_json: str, question: str, answer: str,
 {readable}
 </Know_How_Summary>
 
-以下是**完整的结构化 Know-How**（修改时以此为准）：
+以下是**完整的结构化 Know-How**（操作指令以此为基准）：
 <Current_Know_How>
 {know_how_json}
 </Current_Know_How>
@@ -254,8 +307,8 @@ def kh_minimal_update(know_how_json: str, question: str, answer: str,
 严格输出合法 JSON，不要包含 Markdown 围栏或任何额外文字。
 
 {{
-  "updated_know_how": {{ ... }},
-  "diff_description": "简述本次修改内容（如：在 steps 第2步后插入了新步骤处理 XX 情况；在 exceptions 中追加了 YY 例外）"
-}}
-
-其中 updated_know_how 必须是完整的、符合 Target JSON Schema 的 JSON 对象（不是增量 diff，而是修改后的完整版本）。"""
+  "operations": [
+    // 操作指令数组，按执行顺序排列
+  ],
+  "diff_description": "简述本次修改内容（如：将 step 2 分叉为 2a/2b 处理不同纳税人类型；在 constraints 中追加了 XX 政策依据）"
+}}"""

@@ -23,6 +23,7 @@ for _p in (_V_DIR, _SKILL_ROOT, _EXTRACTION_DIR):
 
 from prompts import safe_parse_json_with_llm_repair
 from prompts_v2 import structured_kh_generate, kh_inference_validate, kh_minimal_update
+from patch_engine import apply_patch
 from case_store import append_edge_cases
 
 _file_lock = Lock()
@@ -195,18 +196,53 @@ def _refine_single_cluster(
                                                   parse_json=True,
                                                   max_retries=max_retries_per_step)
 
-            updated_kh = update_result.get("updated_know_how", know_how)
+            ops = update_result.get("operations", [])
             diff_desc = update_result.get("diff_description", "")
-            know_how = updated_kh
 
-            refinement_log.append({
-                "index": s_idx,
-                "role": "validated",
-                "match_level": "partial",
-                "action": f"updated: {diff_desc}",
-            })
-            print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
-                  f"index={s_idx}: partial → updated ({diff_desc[:60]})")
+            if ops:
+                know_how, patch_log = apply_patch(know_how, ops)
+                applied = [p for p in patch_log if p["status"] == "applied"]
+                skipped = [p for p in patch_log if p["status"] == "skipped"]
+                if skipped:
+                    print(f"    [{cluster_key}]   ⚠ {len(skipped)} 个操作被跳过: "
+                          f"{[s['detail'] for s in skipped]}")
+            else:
+                patch_log = []
+                applied = []
+
+            if not applied:
+                edge_cases.append({
+                    "index": s_idx,
+                    "input": {
+                        "question": s_q,
+                        "answer": s_a,
+                        "extra_info": s_ei,
+                    },
+                    "inference_result": derived_answer,
+                    "mismatch_reason": mismatch_analysis,
+                    "patch_failure": True,
+                    "patch_log": patch_log,
+                })
+                refinement_log.append({
+                    "index": s_idx,
+                    "role": "validated",
+                    "match_level": "partial",
+                    "action": f"patch_failed (0/{len(ops)} ops applied) → edge_case",
+                    "patch_log": patch_log,
+                })
+                print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
+                      f"index={s_idx}: partial → patch 全部失败 → 转入边缘案例")
+            else:
+                refinement_log.append({
+                    "index": s_idx,
+                    "role": "validated",
+                    "match_level": "partial",
+                    "action": f"patched ({len(applied)} ops): {diff_desc}",
+                    "patch_log": patch_log,
+                })
+                print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
+                      f"index={s_idx}: partial → patched {len(applied)} ops "
+                      f"({diff_desc[:60]})")
 
         else:
             edge_cases.append({
