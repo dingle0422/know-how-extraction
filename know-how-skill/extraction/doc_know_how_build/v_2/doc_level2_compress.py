@@ -41,7 +41,7 @@ sys.path.insert(0, _V_DIR)
 from doc_level1_extract import run_doc_level1_extraction, _SUPPORTED_DOC_EXTS
 from doc_structure_parse import parse_document
 from prompts import safe_parse_json_with_llm_repair
-from utils import get_source_stem, publish_to_knowledge
+from utils import get_source_stem, publish_to_knowledge, build_retrieval_index
 from clustering import make_clusters
 
 _compress_lock = Lock()
@@ -222,6 +222,9 @@ def run_level2_compression_v2(
     min_case_chars: int = 50,
     max_workers: int = 16,
     source_file: str = "",
+    embedding_func=None,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
 ):
     """
     V2 二级知识压缩入口（AgglomerativeClustering + 废料分流）。
@@ -237,6 +240,9 @@ def run_level2_compression_v2(
     min_case_chars : 废料备份最小字数阈值（低于此值直接丢弃）
     max_workers : 并发线程数
     source_file : 源文件名（用于备份库标注）
+    embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
+    tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
+    embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
     """
     # ── 加载 + 分流 ──
     valid_items, waste_items = _load_and_triage_level1(
@@ -251,7 +257,13 @@ def run_level2_compression_v2(
         return output_file
 
     # ── 新聚类 ──
-    clusters = make_clusters(valid_items, cosine_threshold=cosine_threshold)
+    clusters = make_clusters(
+        valid_items,
+        cosine_threshold=cosine_threshold,
+        embedding_func=embedding_func,
+        tfidf_weight=tfidf_weight,
+        embedding_weight=embedding_weight,
+    )
 
     # ── 断点续传检查 ──
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
@@ -318,6 +330,9 @@ def run_full_pipeline_for_doc(
     max_seg_chars: int = 2000,
     force_llm_toc: bool = True,
     llm_toc_workers: int = 8,
+    embedding_func=None,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
 ):
     """
     对单个源文档执行完整的 Level 1 → 废料分流 → 新聚类 → Level 2 → Knowledge 流水线。
@@ -368,6 +383,9 @@ def run_full_pipeline_for_doc(
         min_case_chars=min_case_chars,
         max_workers=level2_max_workers,
         source_file=os.path.basename(doc_path),
+        embedding_func=embedding_func,
+        tfidf_weight=tfidf_weight,
+        embedding_weight=embedding_weight,
     )
 
     # ── Level 2 Markdown 预览 ──
@@ -405,6 +423,26 @@ def run_full_pipeline_for_doc(
             level1_json_path=level1_file,
         )
 
+    # ── 构建检索索引 ──
+    _knowledge_json = os.path.join(knowledge_sub, "knowledge.json")
+    if os.path.exists(_knowledge_json):
+        _emb_func = None
+        try:
+            import importlib.util as _ilu
+            _skill_utils_path = os.path.join(_SKILL_ROOT, "utils.py")
+            if os.path.exists(_skill_utils_path):
+                _spec = _ilu.spec_from_file_location("_skill_utils", _skill_utils_path)
+                _m = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_m)
+                _emb_func = _m.get_embeddings
+        except Exception:
+            pass
+        build_retrieval_index(
+            knowledge_json_path=_knowledge_json,
+            knowledge_dir=knowledge_sub,
+            embedding_func=_emb_func,
+        )
+
     # 复制废料备份到 knowledge 目录
     if os.path.exists(waste_file):
         import shutil
@@ -440,6 +478,14 @@ if __name__ == "__main__":
         "--min-case-chars", type=int, default=50,
         help="废料备份最小字数阈值，低于此值直接丢弃 (默认 50)",
     )
+    parser.add_argument(
+        "--tfidf-weight", type=float, default=1.0,
+        help="聚类时 TF-IDF 相似度权重 (默认 1.0，设为 0 跳过 TF-IDF)",
+    )
+    parser.add_argument(
+        "--embedding-weight", type=float, default=0.0,
+        help="聚类时 Dense Embedding 相似度权重 (默认 0.0，设为 0 跳过 Embedding)",
+    )
     args = parser.parse_args()
 
     input_dir = os.path.join(_PACKAGE_DIR, "input")
@@ -472,10 +518,25 @@ if __name__ == "__main__":
             )
         mode_desc = "全量扫描模式"
 
+    _emb_func = None
+    if args.embedding_weight > 0:
+        try:
+            import importlib.util as _ilu
+            _skill_utils_path = os.path.join(_SKILL_ROOT, "utils.py")
+            if os.path.exists(_skill_utils_path):
+                _spec = _ilu.spec_from_file_location("_skill_utils", _skill_utils_path)
+                _m = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_m)
+                _emb_func = _m.get_embeddings
+        except Exception as _e:
+            print(f"[警告] 无法加载 embedding 服务: {_e}，聚类将回退纯 TF-IDF")
+
     print("=" * 60)
     print(f"[doc v2 升级版] {mode_desc}，共 {len(doc_files)} 个源文档")
     print(f"  cosine_threshold={args.cosine_threshold}, "
-          f"min_case_chars={args.min_case_chars}")
+          f"min_case_chars={args.min_case_chars}, "
+          f"tfidf_weight={args.tfidf_weight}, "
+          f"embedding_weight={args.embedding_weight}")
     print("=" * 60)
     for i, fp in enumerate(doc_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")
@@ -497,6 +558,9 @@ if __name__ == "__main__":
             level1_max_workers=os.cpu_count() or 4,
             level2_max_workers=os.cpu_count() or 4,
             max_retries=100,
+            embedding_func=_emb_func,
+            tfidf_weight=args.tfidf_weight,
+            embedding_weight=args.embedding_weight,
         )
 
     print(f"\n{'═' * 60}")

@@ -332,6 +332,9 @@ def run_level2_refinement(
     max_workers: int = 4,
     max_retries_per_step: int = 5,
     source_file: str = "",
+    embedding_func=None,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
 ):
     """
     V2 二级知识精炼入口。
@@ -347,6 +350,9 @@ def run_level2_refinement(
     max_workers : 簇间并行线程数
     max_retries_per_step : 每个 LLM 调用步骤的最大重试次数
     source_file : 源数据文件名（用于案例库标注）
+    embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
+    tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
+    embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
     """
     from clustering import make_clusters
     from case_store import save_general_cases
@@ -363,7 +369,13 @@ def run_level2_refinement(
         return output_file
 
     # ── 聚类 ──────────────────────────────────────────────────────────────
-    clusters = make_clusters(valid_items, cosine_threshold=cosine_threshold)
+    clusters = make_clusters(
+        valid_items,
+        cosine_threshold=cosine_threshold,
+        embedding_func=embedding_func,
+        tfidf_weight=tfidf_weight,
+        embedding_weight=embedding_weight,
+    )
 
     # ── 断点续传检查 ──────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)

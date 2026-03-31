@@ -1,9 +1,10 @@
 """
-V2 聚类模块：jieba + TF-IDF + AgglomerativeClustering (cosine 阈值)。
-用 cosine 相似度阈值自适应控制簇数量和边界，替代 V1 的固定簇大小约束。
+V2 聚类模块：TF-IDF + Dense Embedding 混合相似度 + AgglomerativeClustering。
+支持通过权重参数灵活切换：纯 TF-IDF / 纯 Dense / 混合聚类。
 """
 
 import re
+from typing import Callable
 
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -96,15 +97,73 @@ def _cluster_metadata(idx_list: list[int], X: np.ndarray,
     }
 
 
-def make_clusters(items: list[dict], cosine_threshold: float = 0.75) -> list[dict]:
+def _build_hybrid_similarity(
+    X_tfidf: np.ndarray,
+    texts: list[str],
+    embedding_func: Callable | None,
+    tfidf_weight: float,
+    embedding_weight: float,
+) -> np.ndarray:
+    """根据权重构建融合相似度矩阵。权重为 0 的分支跳过计算。"""
+    S = np.zeros((len(texts), len(texts)))
+
+    if tfidf_weight > 0:
+        S_tfidf = cosine_similarity(X_tfidf)
+        S += tfidf_weight * S_tfidf
+        print(f"[Clustering] TF-IDF 相似度已计算 (weight={tfidf_weight})")
+
+    if embedding_weight > 0 and embedding_func is not None:
+        try:
+            print(f"[Clustering] 正在计算 Dense Embedding ({len(texts)} 条)...")
+            embeddings = embedding_func(texts)
+            E = np.array(embeddings)
+            S_emb = cosine_similarity(E)
+            S += embedding_weight * S_emb
+            print(f"[Clustering] Dense Embedding 相似度已计算 "
+                  f"(weight={embedding_weight}, dim={E.shape[1]})")
+        except Exception as e:
+            print(f"[Clustering] Dense Embedding 计算失败，回退纯 TF-IDF: {e}")
+            if tfidf_weight == 0:
+                S_tfidf = cosine_similarity(X_tfidf)
+                S += S_tfidf
+    elif embedding_weight > 0 and embedding_func is None:
+        print(f"[Clustering] embedding_weight={embedding_weight} 但未提供 "
+              f"embedding_func，回退纯 TF-IDF")
+        if tfidf_weight == 0:
+            S_tfidf = cosine_similarity(X_tfidf)
+            S += S_tfidf
+
+    total_weight = tfidf_weight + embedding_weight
+    if total_weight > 0 and total_weight != 1.0:
+        S /= total_weight
+
+    return S
+
+
+def make_clusters(
+    items: list[dict],
+    cosine_threshold: float = 0.75,
+    embedding_func: Callable | None = None,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
+) -> list[dict]:
     """
-    将 items 按语义相似度聚类：TF-IDF 向量化 + AgglomerativeClustering。
-    以 cosine 相似度阈值（而非固定簇大小）控制聚类边界。
+    将 items 按相似度聚类，支持 TF-IDF / Dense Embedding / 混合三种模式。
+
+    通过权重控制聚类模式：
+      - tfidf_weight=1, embedding_weight=0 → 纯 TF-IDF（默认，向后兼容）
+      - tfidf_weight=0, embedding_weight=1 → 纯 Dense Embedding
+      - tfidf_weight=0.5, embedding_weight=0.5 → 混合
+    权重为 0 的分支跳过计算，避免不必要的开销。
 
     Parameters
     ----------
     items : Level 1 有效条目列表，每项需含 'Know_How' 字段。
-    cosine_threshold : 簇内最低 cosine 相似度，默认 0.75。
+    cosine_threshold : 融合相似度空间中的最低阈值，默认 0.75。
+    embedding_func : Dense embedding 函数，签名 (texts: list[str]) -> list[list[float]]；
+                     为 None 时自动回退纯 TF-IDF。
+    tfidf_weight : TF-IDF 相似度权重，默认 1.0。设为 0 跳过 TF-IDF 相似度计算。
+    embedding_weight : Dense Embedding 相似度权重，默认 0.0。设为 0 跳过 Embedding 计算。
 
     Returns
     -------
@@ -112,7 +171,7 @@ def make_clusters(items: list[dict], cosine_threshold: float = 0.75) -> list[dic
       - items           : 本簇的条目列表
       - centroid_item   : 距簇质心最近的条目（质心样本）
       - keywords        : TF-IDF top-5 关键词
-      - cohesion        : 内聚度指标
+      - cohesion        : 内聚度指标（基于 TF-IDF）
       - sorted_others   : 非质心样本按 cosine 降序排列
     """
     n = len(items)
@@ -134,14 +193,33 @@ def make_clusters(items: list[dict], cosine_threshold: float = 0.75) -> list[dic
             "global_indices": [0],
         }]
 
-    distance_threshold = 1.0 - cosine_threshold
-    clustering = AgglomerativeClustering(
-        n_clusters=None,
-        distance_threshold=distance_threshold,
-        metric="cosine",
-        linkage="average",
-    )
-    labels = clustering.fit_predict(X)
+    use_hybrid = (embedding_weight > 0 and embedding_func is not None)
+    use_pure_embedding = (tfidf_weight == 0 and embedding_weight > 0)
+
+    if use_hybrid or use_pure_embedding:
+        S = _build_hybrid_similarity(
+            X, texts, embedding_func, tfidf_weight, embedding_weight,
+        )
+        D = np.clip(1.0 - S, 0.0, 2.0)
+        np.fill_diagonal(D, 0.0)
+
+        distance_threshold = 1.0 - cosine_threshold
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            metric="precomputed",
+            linkage="average",
+        )
+        labels = clustering.fit_predict(D)
+    else:
+        distance_threshold = 1.0 - cosine_threshold
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            metric="cosine",
+            linkage="average",
+        )
+        labels = clustering.fit_predict(X)
 
     cluster_indices: dict[int, list[int]] = {}
     for pos, label in enumerate(labels):
@@ -171,8 +249,14 @@ def make_clusters(items: list[dict], cosine_threshold: float = 0.75) -> list[dic
         })
 
     sizes = [len(c["items"]) for c in result]
+    mode_desc = "纯TF-IDF"
+    if use_pure_embedding:
+        mode_desc = "纯Embedding"
+    elif use_hybrid:
+        mode_desc = f"混合(tfidf={tfidf_weight}, emb={embedding_weight})"
     print(
-        f"[Level-2] 共 {len(result)} 个簇（cosine 阈值={cosine_threshold}），"
+        f"[Level-2] 共 {len(result)} 个簇（{mode_desc}，"
+        f"cosine 阈值={cosine_threshold}），"
         f"簇大小：min={min(sizes)}, max={max(sizes)}, avg={sum(sizes)/len(sizes):.1f}"
     )
     return result

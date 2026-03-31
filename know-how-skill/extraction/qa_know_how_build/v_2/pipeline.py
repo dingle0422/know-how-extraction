@@ -33,6 +33,9 @@ def run_full_pipeline_for_qa_v2(
     max_retries: int = 100,
     max_retries_per_step: int = 5,
     column_map: dict[str, str] | None = None,
+    embedding_func=None,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
 ):
     """
     V2 完整流水线：对单个 QA 源文件执行 Level 1 → Level 2 增量精炼 → Knowledge 发布。
@@ -50,11 +53,14 @@ def run_full_pipeline_for_qa_v2(
     max_retries : Level 1 每项最大重试次数
     max_retries_per_step : Level 2 每步 LLM 调用最大重试次数
     column_map : 列名映射 {标准名: 实际列名}，如 {"question": "问题", "answer": "回答"}
+    embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
+    tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
+    embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
     """
     import pandas as pd
     from level1_extract import run_level1_extraction
     from level2_refine import run_level2_refinement
-    from utils import get_source_stem, publish_to_knowledge
+    from utils import get_source_stem, publish_to_knowledge, build_retrieval_index
 
     source_stem = get_source_stem(source_file)
     os.makedirs(output_dir, exist_ok=True)
@@ -144,6 +150,9 @@ def run_full_pipeline_for_qa_v2(
         max_workers=level2_max_workers,
         max_retries_per_step=max_retries_per_step,
         source_file=os.path.basename(source_file),
+        embedding_func=embedding_func,
+        tfidf_weight=tfidf_weight,
+        embedding_weight=embedding_weight,
     )
 
     # Level 2 Markdown 预览
@@ -211,6 +220,26 @@ def run_full_pipeline_for_qa_v2(
             level1_json_path=level1_file,
         )
 
+    # ── 构建检索索引 ─────────────────────────────────────────────────
+    _knowledge_json = os.path.join(knowledge_sub, "knowledge.json")
+    if os.path.exists(_knowledge_json):
+        _emb_func = None
+        try:
+            import importlib.util as _ilu
+            _skill_utils_path = os.path.join(_SKILL_ROOT, "utils.py")
+            if os.path.exists(_skill_utils_path):
+                _spec = _ilu.spec_from_file_location("_skill_utils", _skill_utils_path)
+                _m = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_m)
+                _emb_func = _m.get_embeddings
+        except Exception:
+            pass
+        build_retrieval_index(
+            knowledge_json_path=_knowledge_json,
+            knowledge_dir=knowledge_sub,
+            embedding_func=_emb_func,
+        )
+
     # 复制案例库到 knowledge 目录
     import shutil
     if os.path.exists(general_cases_file):
@@ -260,6 +289,14 @@ if __name__ == "__main__":
             "示例: --column-map question=问题 answer=回答 reasoning=推理过程"
         ),
     )
+    parser.add_argument(
+        "--tfidf-weight", type=float, default=1.0,
+        help="聚类时 TF-IDF 相似度权重 (默认 1.0，设为 0 跳过 TF-IDF)",
+    )
+    parser.add_argument(
+        "--embedding-weight", type=float, default=0.0,
+        help="聚类时 Dense Embedding 相似度权重 (默认 0.0，设为 0 跳过 Embedding)",
+    )
     args = parser.parse_args()
 
     column_map: dict[str, str] | None = None
@@ -306,9 +343,24 @@ if __name__ == "__main__":
             )
         mode_desc = "全量扫描模式"
 
+    _emb_func = None
+    if args.embedding_weight > 0:
+        try:
+            import importlib.util as _ilu
+            _skill_utils_path = os.path.join(_SKILL_ROOT, "utils.py")
+            if os.path.exists(_skill_utils_path):
+                _spec = _ilu.spec_from_file_location("_skill_utils", _skill_utils_path)
+                _m = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_m)
+                _emb_func = _m.get_embeddings
+        except Exception as _e:
+            print(f"[警告] 无法加载 embedding 服务: {_e}，聚类将回退纯 TF-IDF")
+
     print("=" * 60)
     print(f"[V2 Pipeline] {mode_desc}，共 {len(source_files)} 个源数据文件")
-    print(f"  cosine_threshold={args.cosine_threshold}")
+    print(f"  cosine_threshold={args.cosine_threshold}, "
+          f"tfidf_weight={args.tfidf_weight}, "
+          f"embedding_weight={args.embedding_weight}")
     print("=" * 60)
     for i, fp in enumerate(source_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")
@@ -330,6 +382,9 @@ if __name__ == "__main__":
             max_retries=100,
             max_retries_per_step=5,
             column_map=column_map,
+            embedding_func=_emb_func,
+            tfidf_weight=args.tfidf_weight,
+            embedding_weight=args.embedding_weight,
         )
 
     print(f"\n{'═' * 60}")
