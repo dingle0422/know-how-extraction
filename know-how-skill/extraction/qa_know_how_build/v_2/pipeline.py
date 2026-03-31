@@ -33,6 +33,7 @@ def run_full_pipeline_for_qa_v2(
     max_retries: int = 100,
     max_retries_per_step: int = 5,
     column_map: dict[str, str] | None = None,
+    extra_columns: list[str] | None = None,
     embedding_func=None,
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
@@ -53,6 +54,7 @@ def run_full_pipeline_for_qa_v2(
     max_retries : Level 1 每项最大重试次数
     max_retries_per_step : Level 2 每步 LLM 调用最大重试次数
     column_map : 列名映射 {标准名: 实际列名}，如 {"question": "问题", "answer": "回答"}
+    extra_columns : 指定哪些非核心列纳入 Extra_Information，为 None 或空时不生成额外信息
     embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
     tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
     embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
@@ -97,16 +99,22 @@ def run_full_pipeline_for_qa_v2(
         data_train["reasoning"] = ""
         print(f"  提示: 源文件中不含 reasoning 列，已自动创建并置空")
 
-    core_cols = {"question", "reasoning", "answer"}
     if "Extra_Information" not in data_train.columns:
-        extra_cols = [c for c in data_train.columns if c not in core_cols]
-        if extra_cols:
-            data_train["Extra_Information"] = data_train[extra_cols].apply(
-                lambda row: "; ".join(
-                    f"{k}={v}" for k, v in row.items() if pd.notna(v)
-                ),
-                axis=1,
-            )
+        if extra_columns:
+            valid_extra = [c for c in extra_columns if c in data_train.columns]
+            invalid_extra = [c for c in extra_columns if c not in data_train.columns]
+            if invalid_extra:
+                print(f"  [警告] --extra-columns 中以下列在文件中不存在，已忽略: {invalid_extra}")
+            if valid_extra:
+                data_train["Extra_Information"] = data_train[valid_extra].apply(
+                    lambda row: "; ".join(
+                        f"{k}={v}" for k, v in row.items() if pd.notna(v)
+                    ),
+                    axis=1,
+                )
+                print(f"  Extra_Information 已从以下列生成: {valid_extra}")
+            else:
+                data_train["Extra_Information"] = ""
         else:
             data_train["Extra_Information"] = ""
     print(f"  数据加载完成: {len(data_train)} 条记录")
@@ -290,6 +298,14 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--extra-columns", "-e", nargs="*", metavar="COL_NAME",
+        help=(
+            "指定哪些非核心列纳入 Extra_Information。"
+            "不指定则不生成 Extra_Information。"
+            "示例: --extra-columns 产品类型 客户等级 渠道"
+        ),
+    )
+    parser.add_argument(
         "--tfidf-weight", type=float, default=1.0,
         help="聚类时 TF-IDF 相似度权重 (默认 1.0，设为 0 跳过 TF-IDF)",
     )
@@ -382,6 +398,7 @@ if __name__ == "__main__":
             max_retries=100,
             max_retries_per_step=5,
             column_map=column_map,
+            extra_columns=args.extra_columns or None,
             embedding_func=_emb_func,
             tfidf_weight=args.tfidf_weight,
             embedding_weight=args.embedding_weight,
