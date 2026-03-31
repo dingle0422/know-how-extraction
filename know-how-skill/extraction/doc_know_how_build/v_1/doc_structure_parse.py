@@ -46,18 +46,13 @@ _EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
 _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 
 try:
-    from prompts import (
-        safe_parse_json_with_llm_repair,
-        doc_page_toc_summary_prompt,
-        doc_toc_keywords_prompt,
-    )
+    from prompts import safe_parse_json_with_llm_repair
+    from prompts_doc import doc_page_toc_summary_prompt, doc_toc_keywords_prompt
 except ImportError:
     sys.path.insert(0, _SKILL_ROOT)
-    from prompts import (
-        safe_parse_json_with_llm_repair,
-        doc_page_toc_summary_prompt,
-        doc_toc_keywords_prompt,
-    )
+    sys.path.insert(0, _PACKAGE_DIR)
+    from prompts import safe_parse_json_with_llm_repair
+    from prompts_doc import doc_page_toc_summary_prompt, doc_toc_keywords_prompt
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

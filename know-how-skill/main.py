@@ -20,6 +20,8 @@ import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "extraction", "qa_know_how_build"))
+sys.path.insert(0, os.path.join(BASE_DIR, "inference"))
 
 # 输入文件（按需修改）
 ANSWER_FILE = os.path.join(BASE_DIR, "output_kh_zqrz317_experts.xlsx")
@@ -46,7 +48,7 @@ MAX_WORKERS = 16
 def run_extraction():
     """提炼阶段：一级 → 二级 → 三级"""
     from llm_client import chat, qwen
-    from prompts import single_v1, compression_v2, merge_v0, shrink_v0
+    from prompts_v1 import single_v1, compression_v2, merge_v0, shrink_v0
     from data_loader import load_and_prepare
     from extraction.level1_extract import run_level1_extraction
     from extraction.level2_compress import run_level2_compression
@@ -119,7 +121,7 @@ def run_extraction():
 def run_inference():
     """推理阶段：MapReduce 推理测试"""
     from llm_client import chat, qwen
-    from prompts import infer_v1, summary_v0, potential_pitfalls
+    from prompts_infer import infer_v1, summary_v0, potential_pitfalls
     from inference.mapreduce_infer import run_mapreduce_inference
 
     print("=" * 60)

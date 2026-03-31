@@ -524,8 +524,9 @@ if __name__ == "__main__":
     import argparse
 
     sys.path.insert(0, _SKILL_ROOT)
+    sys.path.insert(0, _PACKAGE_DIR)
     from llm_client import chat
-    from prompts import single_v1, compression_v2
+    from prompts_v1 import single_v1, compression_v2
 
     parser = argparse.ArgumentParser(
         description="QA 知识抽取流水线（Level 1 → Level 2 → Knowledge）"

@@ -29,6 +29,8 @@ _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 _V1_DIR = os.path.join(_PACKAGE_DIR, "v_1")
 if _V1_DIR not in sys.path:
     sys.path.insert(0, _V1_DIR)
+if _PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, _PACKAGE_DIR)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
@@ -366,7 +368,7 @@ if __name__ == "__main__":
     import argparse
 
     from llm_client import chat
-    from prompts import doc_extract_v1
+    from prompts_doc import doc_extract_v1
 
     sys.path.insert(0, _EXTRACTION_DIR)
     from utils import get_source_stem

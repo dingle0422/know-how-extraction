@@ -15,6 +15,7 @@ _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 sys.path.insert(0, _SKILL_ROOT)
 sys.path.insert(0, _EXTRACTION_DIR)
 sys.path.insert(0, _V_DIR)
+sys.path.insert(0, _PACKAGE_DIR)
 sys.path.insert(0, os.path.join(_PACKAGE_DIR, "v_1"))
 
 _SUPPORTED_QA_EXTS = {".csv", ".xlsx", ".xls"}
@@ -31,6 +32,7 @@ def run_full_pipeline_for_qa_v2(
     level2_max_workers: int = 4,
     max_retries: int = 100,
     max_retries_per_step: int = 5,
+    column_map: dict[str, str] | None = None,
 ):
     """
     V2 完整流水线：对单个 QA 源文件执行 Level 1 → Level 2 增量精炼 → Knowledge 发布。
@@ -47,6 +49,7 @@ def run_full_pipeline_for_qa_v2(
     level2_max_workers : Level 2 簇间并发线程数
     max_retries : Level 1 每项最大重试次数
     max_retries_per_step : Level 2 每步 LLM 调用最大重试次数
+    column_map : 列名映射 {标准名: 实际列名}，如 {"question": "问题", "answer": "回答"}
     """
     import pandas as pd
     from level1_extract import run_level1_extraction
@@ -62,6 +65,19 @@ def run_full_pipeline_for_qa_v2(
         data_train = pd.read_csv(source_file, encoding="utf-8-sig")
     else:
         data_train = pd.read_excel(source_file, sheet_name=0)
+
+    if column_map:
+        rename = {v: k for k, v in column_map.items() if v in data_train.columns}
+        missing_src = [
+            f"{k} -> '{v}'"
+            for k, v in column_map.items()
+            if v not in data_train.columns
+        ]
+        if missing_src:
+            print(f"  [警告] column-map 中以下源列在文件中不存在，已忽略: {missing_src}")
+        if rename:
+            data_train = data_train.rename(columns=rename)
+            print(f"  列名映射: {rename}")
 
     required_cols = {"question", "answer"}
     missing = required_cols - set(data_train.columns)
@@ -215,7 +231,7 @@ if __name__ == "__main__":
     import argparse
 
     from llm_client import chat
-    from prompts import single_v1
+    from prompts_v1 import single_v1
 
     parser = argparse.ArgumentParser(
         description="QA 知识抽取 V2 流水线（Level 1 → Level 2 增量精炼 → Knowledge）"
@@ -236,7 +252,29 @@ if __name__ == "__main__":
         "--level2-workers", type=int, default=4,
         help="Level 2 簇间并发线程数",
     )
+    parser.add_argument(
+        "--column-map", "-m", nargs="*", metavar="FIELD=COL_NAME",
+        help=(
+            "列名映射，格式: 标准字段名=文件实际列名。"
+            "标准字段: question, answer, reasoning。"
+            "示例: --column-map question=问题 answer=回答 reasoning=推理过程"
+        ),
+    )
     args = parser.parse_args()
+
+    column_map: dict[str, str] | None = None
+    if args.column_map:
+        _VALID_FIELDS = {"question", "answer", "reasoning"}
+        column_map = {}
+        for item in args.column_map:
+            if "=" not in item:
+                parser.error(f"column-map 格式错误 '{item}'，应为 FIELD=COL_NAME")
+            field, col = item.split("=", 1)
+            if field not in _VALID_FIELDS:
+                parser.error(
+                    f"未知标准字段 '{field}'，可选: {', '.join(sorted(_VALID_FIELDS))}"
+                )
+            column_map[field] = col
 
     input_dir = os.path.join(_PACKAGE_DIR, "input")
     output_dir = os.path.join(_PACKAGE_DIR, "output")
@@ -291,6 +329,7 @@ if __name__ == "__main__":
             level2_max_workers=args.level2_workers,
             max_retries=100,
             max_retries_per_step=5,
+            column_map=column_map,
         )
 
     print(f"\n{'═' * 60}")

@@ -487,7 +487,7 @@ if __name__ == "__main__":
 
     sys.path.insert(0, _SKILL_ROOT)
     from llm_client import chat
-    from prompts import doc_extract_v1
+    from prompts_doc import doc_extract_v1
 
     parser = argparse.ArgumentParser(
         description="文档知识抽取流水线（Layer 0 → Layer 1 → Knowledge）"

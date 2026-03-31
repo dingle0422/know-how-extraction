@@ -191,9 +191,10 @@ if __name__ == "__main__":
 
     sys.path.insert(0, _SKILL_ROOT)
     sys.path.insert(0, _EXTRACTION_DIR)
+    sys.path.insert(0, _PACKAGE_DIR)
     from utils import get_source_stem
     from llm_client import chat
-    from prompts import single_v1
+    from prompts_v1 import single_v1
 
     parser = argparse.ArgumentParser(
         description="QA 一级知识提炼（Level 1）"

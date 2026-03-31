@@ -17,7 +17,7 @@ _PACKAGE_DIR = os.path.dirname(_V_DIR)
 _EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
 _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 
-for _p in (_V_DIR, _SKILL_ROOT, _EXTRACTION_DIR):
+for _p in (_V_DIR, _PACKAGE_DIR, _SKILL_ROOT, _EXTRACTION_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

@@ -26,9 +26,10 @@ _EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
 _SKILL_ROOT = os.path.dirname(_EXTRACTION_DIR)
 
 _V1_DIR = os.path.join(_PACKAGE_DIR, "v_1")
-_QA_V2_DIR = os.path.join(_EXTRACTION_DIR, "qa_know_how_build", "v_2")
+_QA_DIR = os.path.join(_EXTRACTION_DIR, "qa_know_how_build")
+_QA_V2_DIR = os.path.join(_QA_DIR, "v_2")
 
-for _p in (_V_DIR, _V1_DIR, _QA_V2_DIR, _EXTRACTION_DIR, _SKILL_ROOT):
+for _p in (_V_DIR, _V1_DIR, _PACKAGE_DIR, _QA_DIR, _QA_V2_DIR, _EXTRACTION_DIR, _SKILL_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -421,7 +422,8 @@ if __name__ == "__main__":
     import argparse
 
     from llm_client import chat
-    from prompts import doc_extract_v1, compression_v2
+    from prompts_doc import doc_extract_v1
+    from prompts_v1 import compression_v2
 
     parser = argparse.ArgumentParser(
         description="文档知识抽取 v2（升级版）— Level 1 → 废料分流 → 新聚类 → Level 2 → Knowledge"
