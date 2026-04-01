@@ -95,7 +95,7 @@ def _render_structured_kh(kh: dict) -> str:
         for s in steps:
             condition_prefix = ""
             if s.get("condition"):
-                condition_prefix = f"触发条件：{s['condition']}】"
+                condition_prefix = f"【触发条件：{s['condition']}】 → "
             line = f"  {s.get('step', '?')}. {condition_prefix}{s.get('action', '')}"
             if s.get("outcome"):
                 line += f" → {s['outcome']}"

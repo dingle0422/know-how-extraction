@@ -6,6 +6,9 @@ Know-How 结构化补丁引擎
 """
 
 import copy
+import re
+
+_STEP_ID_RE = re.compile(r'^(\d+)([a-zA-Z]?)')
 
 
 def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict]]:
@@ -44,11 +47,35 @@ def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict
                 "seq": i, "op": op_type, "status": "skipped", "detail": str(e),
             })
 
+    if "steps" in kh and kh["steps"]:
+        _sort_steps(kh["steps"])
+
     return kh, patch_log
 
 
 class _PatchSkip(Exception):
     """操作校验不通过时抛出，用于跳过该操作。"""
+
+
+# ─── Steps 排序 ───────────────────────────────────────────────────────────────
+
+def _parse_step_sort_key(step_id: str) -> tuple:
+    """将 step 编号解析为可排序的 tuple，如 "2a" → (2, 'a', 0)。"""
+    s = str(step_id).strip()
+    m = _STEP_ID_RE.match(s)
+    if not m:
+        return (9999, '', 0)
+    major = int(m.group(1))
+    branch = m.group(2).lower() if m.group(2) else ''
+    rest = s[m.end():]
+    sub_m = re.match(r'[-]?(\d+)', rest)
+    sub = int(sub_m.group(1)) if sub_m else 0
+    return (major, branch, sub)
+
+
+def _sort_steps(steps: list[dict]) -> None:
+    """按 step 编号的逻辑顺序原地排序。"""
+    steps.sort(key=lambda s: _parse_step_sort_key(s.get("step", "")))
 
 
 # ─── Steps 操作 ───────────────────────────────────────────────────────────────

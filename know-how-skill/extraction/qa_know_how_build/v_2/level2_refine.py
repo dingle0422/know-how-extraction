@@ -22,7 +22,7 @@ for _p in (_V_DIR, _PACKAGE_DIR, _SKILL_ROOT, _EXTRACTION_DIR):
         sys.path.insert(0, _p)
 
 from prompts import safe_parse_json_with_llm_repair
-from prompts_v2 import structured_kh_generate, kh_inference_validate, kh_minimal_update
+from prompts_v2 import structured_kh_generate, kh_inference_validate, kh_minimal_update, kh_normalize_steps
 from patch_engine import apply_patch
 from case_store import append_edge_cases
 
@@ -159,6 +159,7 @@ def _refine_single_cluster(
         s_a = s_inp.get("answer", "")
         s_ei = s_inp.get("Extra_Information", "")
         s_idx = sample["index"]
+        s_kh_text = sample.get("Know_How", "")
 
         # 推理验证
         validate_prompt = kh_inference_validate(
@@ -217,6 +218,7 @@ def _refine_single_cluster(
                         "question": s_q,
                         "answer": s_a,
                         "extra_info": s_ei,
+                        "know_how": s_kh_text,
                     },
                     "inference_result": derived_answer,
                     "mismatch_reason": mismatch_analysis,
@@ -251,6 +253,7 @@ def _refine_single_cluster(
                     "question": s_q,
                     "answer": s_a,
                     "extra_info": s_ei,
+                    "know_how": s_kh_text,
                 },
                 "inference_result": derived_answer,
                 "mismatch_reason": mismatch_analysis,
@@ -264,7 +267,31 @@ def _refine_single_cluster(
             print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
                   f"index={s_idx}: none → edge case")
 
-    # ── Step 3: 写入结果 ──────────────────────────────────────────────────
+    # ── Step 3: LLM 步骤编号归一化 ──────────────────────────────────────────
+    if know_how.get("steps"):
+        try:
+            norm_prompt = kh_normalize_steps(
+                json.dumps(know_how, ensure_ascii=False, indent=2)
+            )
+            norm_result = _llm_call_with_retry(
+                llm_func, norm_prompt, parse_json=True,
+                max_retries=max_retries_per_step,
+            )
+            new_steps = norm_result.get("steps") if isinstance(norm_result, dict) else None
+            if new_steps and isinstance(new_steps, list) and len(new_steps) == len(know_how["steps"]):
+                know_how["steps"] = new_steps
+                print(f"  [{cluster_key}] 步骤编号归一化完成 ({len(new_steps)} steps)")
+            elif new_steps and isinstance(new_steps, list):
+                know_how["steps"] = new_steps
+                print(f"  [{cluster_key}] 步骤编号归一化完成 "
+                      f"(steps 数量变化: {len(know_how.get('steps', []))} → {len(new_steps)}，"
+                      f"可能发生了合并)")
+            else:
+                print(f"  [{cluster_key}] 步骤归一化返回格式异常，保留原始编号")
+        except Exception as e:
+            print(f"  [{cluster_key}] 步骤编号归一化失败，保留原始编号: {str(e)[:120]}")
+
+    # ── Step 4: 写入结果 ──────────────────────────────────────────────────
     kh_title = know_how.get("title", cluster_key)
 
     result = {
