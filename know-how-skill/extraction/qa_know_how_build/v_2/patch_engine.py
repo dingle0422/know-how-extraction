@@ -8,7 +8,7 @@ Know-How 结构化补丁引擎
 import copy
 import re
 
-_STEP_ID_RE = re.compile(r'^(\d+)([a-zA-Z]?)')
+_STEP_ID_RE = re.compile(r'^\d+(\.\d+)*$')
 
 
 def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict]]:
@@ -59,18 +59,12 @@ class _PatchSkip(Exception):
 
 # ─── Steps 排序 ───────────────────────────────────────────────────────────────
 
-def _parse_step_sort_key(step_id: str) -> tuple:
-    """将 step 编号解析为可排序的 tuple，如 "2a" → (2, 'a', 0)。"""
+def _parse_step_sort_key(step_id: str) -> tuple[int, ...]:
+    """将 step 编号解析为可排序的 int tuple，如 "2.1" → (2, 1)，"3" → (3,)。"""
     s = str(step_id).strip()
-    m = _STEP_ID_RE.match(s)
-    if not m:
-        return (9999, '', 0)
-    major = int(m.group(1))
-    branch = m.group(2).lower() if m.group(2) else ''
-    rest = s[m.end():]
-    sub_m = re.match(r'[-]?(\d+)', rest)
-    sub = int(sub_m.group(1)) if sub_m else 0
-    return (major, branch, sub)
+    if _STEP_ID_RE.match(s):
+        return tuple(int(x) for x in s.split("."))
+    return (9999,)
 
 
 def _sort_steps(steps: list[dict]) -> None:

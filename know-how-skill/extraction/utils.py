@@ -93,10 +93,13 @@ def _render_structured_kh(kh: dict) -> str:
     if steps:
         lines.append("**操作步骤**:")
         for s in steps:
+            step_id = s.get("step", "?")
+            depth = step_id.count(".") if isinstance(step_id, str) else 0
+            indent = "  " * (depth + 1)
             condition_prefix = ""
             if s.get("condition"):
                 condition_prefix = f"【触发条件：{s['condition']}】 → "
-            line = f"  {s.get('step', '?')}. {condition_prefix}{s.get('action', '')}"
+            line = f"{indent}{step_id}. {condition_prefix}{s.get('action', '')}"
             if s.get("outcome"):
                 line += f" → {s['outcome']}"
             lines.append(line)

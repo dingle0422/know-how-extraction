@@ -191,12 +191,15 @@ def run_full_pipeline_for_qa_v2(
             if steps:
                 f.write("**操作步骤**:\n")
                 for s in steps:
-                    line = f"{s.get('step', '?')}. {s.get('action', '')}"
+                    step_id = s.get("step", "?")
+                    depth = step_id.count(".") if isinstance(step_id, str) else 0
+                    indent = "  " * (depth + 1)
+                    line = f"{step_id}. {s.get('action', '')}"
                     if s.get("condition"):
                         line += f" （条件: {s['condition']}）"
                     if s.get("outcome"):
                         line += f" → {s['outcome']}"
-                    f.write(f"  {line}\n")
+                    f.write(f"{indent}{line}\n")
                 f.write("\n")
             exceptions = kh.get("exceptions", [])
             if exceptions:
