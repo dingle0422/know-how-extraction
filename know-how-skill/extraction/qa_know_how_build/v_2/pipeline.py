@@ -38,6 +38,7 @@ def run_full_pipeline_for_qa_v2(
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
     max_cluster_samples: int = 0,
+    group_by_extra: bool = True,
 ):
     """
     V2 完整流水线：对单个 QA 源文件执行 Level 1 → Level 2 增量精炼 → Knowledge 发布。
@@ -60,6 +61,11 @@ def run_full_pipeline_for_qa_v2(
     tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
     embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
     max_cluster_samples : 每个簇的最大样本数，超出部分拆分为新簇。0 表示不限制。
+    group_by_extra : 是否按 Extra_Information 标签组合预分组后再聚类（默认开启）。
+                     为 True 时，先按各样本的 Extra_Information 值将其分组，
+                     然后在每个分组内独立执行聚类，适用于业务标签驱动的场景。
+                     若未指定 extra_columns 或所有样本 Extra_Information 为空，
+                     预分组会自动退化为单组，等效于不分组。
     """
     import pandas as pd
     from level1_extract import run_level1_extraction
@@ -164,6 +170,7 @@ def run_full_pipeline_for_qa_v2(
         tfidf_weight=tfidf_weight,
         embedding_weight=embedding_weight,
         max_cluster_samples=max_cluster_samples,
+        group_by_extra=group_by_extra,
     )
 
     # Level 2 Markdown 预览
@@ -320,6 +327,15 @@ if __name__ == "__main__":
         "--max-cluster-samples", type=int, default=20,
         help="每个聚类簇的最大样本数，超出部分按相似度倒排拆分为新簇 (默认 20，设为 0 不限制)",
     )
+    parser.add_argument(
+        "--no-group-by-extra", dest="group_by_extra",
+        action="store_false", default=True,
+        help=(
+            "禁用按 Extra_Information 标签组合预分组（默认开启）。"
+            "开启时需配合 --extra-columns 使用：先按各样本的 extra 列值组合分组，"
+            "再在每个分组内独立聚类。传入此标志则跳过预分组，直接全量聚类。"
+        ),
+    )
     args = parser.parse_args()
 
     column_map: dict[str, str] | None = None
@@ -384,7 +400,8 @@ if __name__ == "__main__":
     print(f"  cosine_threshold={args.cosine_threshold}, "
           f"tfidf_weight={args.tfidf_weight}, "
           f"embedding_weight={args.embedding_weight}, "
-          f"max_cluster_samples={args.max_cluster_samples}")
+          f"max_cluster_samples={args.max_cluster_samples}, "
+          f"group_by_extra={args.group_by_extra}")
     print("=" * 60)
     for i, fp in enumerate(source_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")
@@ -411,6 +428,7 @@ if __name__ == "__main__":
             tfidf_weight=args.tfidf_weight,
             embedding_weight=args.embedding_weight,
             max_cluster_samples=args.max_cluster_samples,
+            group_by_extra=args.group_by_extra,
         )
 
     print(f"\n{'═' * 60}")

@@ -306,6 +306,7 @@ def _refine_single_cluster(
         "edge_case_indices": [ec["index"] for ec in edge_cases],
         "cluster_keywords": cluster.get("keywords", []),
         "cluster_cohesion": cluster.get("cohesion"),
+        "group_label": cluster.get("group_label", ""),
         "refinement_log": refinement_log,
         "status": "success",
     }
@@ -349,6 +350,17 @@ def _refine_single_cluster_safe(cluster_idx, cluster, total_clusters,
 
 # ─── 多线程入口 ──────────────────────────────────────────────────────────────
 
+def _group_items_by_extra_info(items: list[dict]) -> dict[str, list[dict]]:
+    """按 Extra_Information 标签组合将样本分组。返回 {标签: 样本列表} 有序字典。"""
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        label = item.get("input", {}).get("Extra_Information", "").strip()
+        if not label:
+            label = "__未分类__"
+        groups.setdefault(label, []).append(item)
+    return groups
+
+
 def run_level2_refinement(
     level1_file: str,
     llm_func,
@@ -363,6 +375,7 @@ def run_level2_refinement(
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
     max_cluster_samples: int = 0,
+    group_by_extra: bool = True,
 ):
     """
     V2 二级知识精炼入口。
@@ -382,6 +395,10 @@ def run_level2_refinement(
     tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
     embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
     max_cluster_samples : 每个簇的最大样本数，超出部分拆分为新簇。0 表示不限制。
+    group_by_extra : 是否按 Extra_Information 标签组合预分组后再聚类（默认开启）。
+                     为 True 时，先按 Extra_Information 值将样本分组，
+                     然后在每个分组内独立执行聚类，最终合并所有簇。
+                     若所有样本 Extra_Information 为空，自动退化为单组。
     """
     from clustering import make_clusters
     from case_store import save_general_cases
@@ -397,15 +414,39 @@ def run_level2_refinement(
         print("[Level-2] 无有效 Know_How 可供精炼，流程结束")
         return output_file
 
-    # ── 聚类 ──────────────────────────────────────────────────────────────
-    clusters = make_clusters(
-        valid_items,
-        cosine_threshold=cosine_threshold,
-        embedding_func=embedding_func,
-        tfidf_weight=tfidf_weight,
-        embedding_weight=embedding_weight,
-        max_cluster_samples=max_cluster_samples,
-    )
+    # ── 聚类（可选：先按 Extra_Information 预分组）─────────────────────────
+    if group_by_extra:
+        groups = _group_items_by_extra_info(valid_items)
+        print(f"[Level-2] 按 Extra_Information 预分组: "
+              f"{len(groups)} 个标签组合，共 {len(valid_items)} 条样本")
+        for label, group_items in groups.items():
+            print(f"  ├── [{label}]: {len(group_items)} 条")
+
+        clusters = []
+        for label, group_items in groups.items():
+            if not group_items:
+                continue
+            group_clusters = make_clusters(
+                group_items,
+                cosine_threshold=cosine_threshold,
+                embedding_func=embedding_func,
+                tfidf_weight=tfidf_weight,
+                embedding_weight=embedding_weight,
+                max_cluster_samples=max_cluster_samples,
+            )
+            for c in group_clusters:
+                c["group_label"] = label
+            clusters.extend(group_clusters)
+        print(f"[Level-2] 预分组聚类完成: {len(groups)} 个分组 → {len(clusters)} 个簇")
+    else:
+        clusters = make_clusters(
+            valid_items,
+            cosine_threshold=cosine_threshold,
+            embedding_func=embedding_func,
+            tfidf_weight=tfidf_weight,
+            embedding_weight=embedding_weight,
+            max_cluster_samples=max_cluster_samples,
+        )
 
     # ── 断点续传检查 ──────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
