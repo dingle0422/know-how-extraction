@@ -378,8 +378,92 @@ def load_edge_cases(knowledge_dir: str, entry_key: str) -> list[dict]:
     return cluster_data.get("edge_cases", [])
 
 
-def format_edge_cases_text(edge_cases: list[dict]) -> str:
-    """将边缘案例列表格式化为 LLM 可读的参考文本。"""
+def load_level1_knowhow_map(knowledge_dir: str) -> dict[int, str]:
+    """从 knowledge_traceback.json 加载 index → Level-1 Know_How 文本的映射。
+
+    用于在 Phase 3 边缘案例兜底时，为每个边缘案例补充其一级提炼知识。
+    """
+    traceback_path = os.path.join(knowledge_dir, "knowledge_traceback.json")
+    if not os.path.exists(traceback_path):
+        return {}
+    try:
+        with open(traceback_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+    mapping: dict[int, str] = {}
+    for _key, entry in data.items():
+        idx = entry.get("index", -1)
+        kh = entry.get("Know_How", "")
+        if kh and idx >= 0:
+            mapping[idx] = kh
+    return mapping
+
+
+def retrieve_edge_cases(
+    question: str,
+    edge_cases: list[dict],
+    top_n: int = 3,
+    embedding_func: Callable = None,
+) -> list[dict]:
+    """对单个 cluster 的边缘案例执行混合检索，返回 top-N 最相关的案例。
+
+    检索策略:
+      1. TF-IDF: jieba 分词后计算 token overlap cosine（轻量级，无需预构建索引）
+      2. Dense Embedding: 若提供 embedding_func，计算语义相似度
+      3. 两路分数相加，取 top-N
+    """
+    if not edge_cases or top_n <= 0:
+        return []
+    if len(edge_cases) <= top_n:
+        return edge_cases
+
+    tokenizer = _build_jieba_tokenizer()
+    q_tokens = tokenizer(question)
+    q_token_set = set(q_tokens)
+
+    tfidf_scores: list[float] = []
+    ec_question_texts: list[str] = []
+    for ec in edge_cases:
+        inp = ec.get("input", {})
+        ec_q = inp.get("question", ec.get("question", ""))
+        ec_a = inp.get("answer", ec.get("answer", ""))
+        ec_question_texts.append(ec_q)
+        ec_text = f"{ec_q} {ec_a}"
+        ec_token_set = set(tokenizer(ec_text))
+        if not ec_token_set or not q_token_set:
+            tfidf_scores.append(0.0)
+        else:
+            overlap = q_token_set & ec_token_set
+            tfidf_scores.append(
+                len(overlap) / math.sqrt(len(q_token_set) * len(ec_token_set))
+            )
+
+    dense_scores = [0.0] * len(edge_cases)
+    if embedding_func is not None:
+        try:
+            all_texts = [question] + ec_question_texts
+            embeddings = embedding_func(all_texts)
+            q_emb = embeddings[0]
+            for i in range(len(edge_cases)):
+                dense_scores[i] = _cosine_dense(q_emb, embeddings[i + 1])
+        except Exception as e:
+            print(f"[Retrieval] Edge case dense embedding 失败: {e}")
+
+    combined = [
+        (i, tfidf_scores[i] + dense_scores[i])
+        for i in range(len(edge_cases))
+    ]
+    combined.sort(key=lambda x: x[1], reverse=True)
+    return [edge_cases[i] for i, _ in combined[:top_n]]
+
+
+def format_edge_cases_text(
+    edge_cases: list[dict],
+    level1_map: dict[int, str] | None = None,
+) -> str:
+    """将边缘案例列表格式化为 LLM 可读的参考文本（含 Level-1 Know-How）。"""
     if not edge_cases:
         return ""
 
@@ -393,6 +477,10 @@ def format_edge_cases_text(edge_cases: list[dict]) -> str:
             lines.append(f"问题: {q}")
         if a:
             lines.append(f"答案: {a}")
+        if level1_map:
+            ec_idx = ec.get("index")
+            if ec_idx is not None and ec_idx in level1_map:
+                lines.append(f"关联知识 (Level-1 Know-How): {level1_map[ec_idx]}")
         parts.append("\n".join(lines))
 
     return "\n\n".join(parts)

@@ -17,9 +17,9 @@
       --knowledge-dirs kd1 kd2 \\
       --tfidf-top-n 5 \\
       --embedding-top-n 5 \\
+      --edge-cases-top-n 3 \\
       --max-workers 8 \\
-      --question-column question \\
-      --no-edge-fallback
+      --question-column question
 """
 
 import argparse
@@ -107,12 +107,12 @@ def main():
         help="Map/Phase3 并发线程数（默认: 4）",
     )
     parser.add_argument(
-        "--no-edge-fallback", action="store_true",
-        help="禁用 Phase 3 边缘案例兜底",
+        "--edge-cases-top-n", type=int, default=3,
+        help="Phase 3 边缘案例混合检索 Top-N（默认: 3，设为 0 禁用兜底）",
     )
     parser.add_argument(
         "--no-extra-llm", action="store_true",
-        help="禁用 Reduce 阶段额外 LLM 信息",
+        help="禁用 Reduce 阶段额外 LLM 裸考推理（默认开启）",
     )
     args = parser.parse_args()
 
@@ -183,7 +183,7 @@ def main():
         tfidf_top_n=args.tfidf_top_n,
         embedding_top_n=args.embedding_top_n,
         map_max_workers=args.max_workers,
-        enable_edge_case_fallback=not args.no_edge_fallback,
+        edge_cases_top_n=args.edge_cases_top_n,
         question_column=args.question_column,
     )
 

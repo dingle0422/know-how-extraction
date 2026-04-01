@@ -18,6 +18,8 @@ from .retrieval import (
     retrieve_candidates,
     load_knowledge_content,
     load_edge_cases,
+    load_level1_knowhow_map,
+    retrieve_edge_cases,
     format_edge_cases_text,
 )
 
@@ -76,28 +78,45 @@ def _run_edge_case_fallback(
     task_input: dict,
     llm_func: Callable,
     edge_case_prompt_func: Callable,
+    edge_cases_top_n: int = 3,
+    embedding_func: Callable = None,
 ) -> dict:
-    """对 QA Know-How 中 Map 判定无效的条目，用边缘案例做兜底推理。"""
+    """对 QA Know-How 中 Map 判定无效的条目，用边缘案例做兜底推理。
+
+    改进: 通过混合检索（TF-IDF + Dense）筛选 top-N 最相关的边缘案例，
+    并附带 Level-1 Know-How 作为辅助推理上下文。
+    """
     question = task_input["question"]
     knowledge_dir = task_input["knowledge_dir"]
     entry_key = task_input["entry_key"]
+    level1_map = task_input.get("level1_map", {})
 
-    edge_cases = load_edge_cases(knowledge_dir, entry_key)
+    _empty = {
+        "q_idx": task_input["q_idx"],
+        "source_dir": task_input["source_dir"],
+        "entry_key": entry_key,
+        "knowledge_type": "qa_v2",
+        "kh_source_id": f"{task_input['source_dir']}:{entry_key}:edge",
+        "Match_Status": "NO",
+        "Rejection_Reason": "无可用边缘案例",
+        "Reasoning_Chain": "",
+        "Derived_Answer": "",
+        "is_edge_case_fallback": True,
+    }
+
+    all_edge_cases = load_edge_cases(knowledge_dir, entry_key)
+    if not all_edge_cases:
+        return _empty
+
+    edge_cases = retrieve_edge_cases(
+        question, all_edge_cases,
+        top_n=edge_cases_top_n,
+        embedding_func=embedding_func,
+    )
     if not edge_cases:
-        return {
-            "q_idx": task_input["q_idx"],
-            "source_dir": task_input["source_dir"],
-            "entry_key": entry_key,
-            "knowledge_type": "qa_v2",
-            "kh_source_id": f"{task_input['source_dir']}:{entry_key}:edge",
-            "Match_Status": "NO",
-            "Rejection_Reason": "无可用边缘案例",
-            "Reasoning_Chain": "",
-            "Derived_Answer": "",
-            "is_edge_case_fallback": True,
-        }
+        return _empty
 
-    ec_text = format_edge_cases_text(edge_cases)
+    ec_text = format_edge_cases_text(edge_cases, level1_map=level1_map)
 
     try:
         prompt = edge_case_prompt_func(question, ec_text)
@@ -195,7 +214,7 @@ def run_mapreduce_inference(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
-    enable_edge_case_fallback: bool = True,
+    edge_cases_top_n: int = 3,
 ) -> list[dict]:
     """
     完整 4 阶段 MapReduce 推理流水线。
@@ -215,7 +234,7 @@ def run_mapreduce_inference(
     tfidf_top_n              : TF-IDF 检索 Top-N
     embedding_top_n          : Dense Embedding 检索 Top-N
     map_max_workers          : Map 阶段并发线程数
-    enable_edge_case_fallback: 是否启用边缘案例兜底
+    edge_cases_top_n         : Phase 3 边缘案例检索 Top-N（0 = 禁用）
 
     Returns
     -------
@@ -223,6 +242,17 @@ def run_mapreduce_inference(
     """
     print(f"[Infer] 收到 {len(questions)} 个问题, "
           f"{len(knowledge_dirs)} 个知识目录")
+
+    # ── 预加载 Level-1 Know-How 映射（用于 Phase 3 边缘案例兜底）──
+    level1_maps: dict[str, dict[int, str]] = {}
+    if edge_cases_top_n > 0 and edge_case_prompt_func is not None:
+        for d in knowledge_dirs:
+            l1 = load_level1_knowhow_map(d)
+            if l1:
+                level1_maps[d] = l1
+        if level1_maps:
+            total_l1 = sum(len(v) for v in level1_maps.values())
+            print(f"[Infer] 已加载 Level-1 Know-How 映射: {total_l1} 条")
 
     all_output = []
 
@@ -293,7 +323,7 @@ def run_mapreduce_inference(
 
         # ── Phase 3: 边缘案例兜底（仅 QA Know-How）──────────────────
         edge_fallback_results = []
-        if enable_edge_case_fallback and edge_case_prompt_func is not None:
+        if edge_cases_top_n > 0 and edge_case_prompt_func is not None:
             qa_rejected = [
                 r for r in rejected_results
                 if r.get("knowledge_type") == "qa_v2"
@@ -301,14 +331,16 @@ def run_mapreduce_inference(
             if qa_rejected:
                 edge_tasks = []
                 for r in qa_rejected:
+                    kd = _find_knowledge_dir(
+                        knowledge_dirs, r["source_dir"],
+                    )
                     edge_tasks.append({
                         "q_idx": q_idx,
                         "question": question,
                         "source_dir": r["source_dir"],
-                        "knowledge_dir": _find_knowledge_dir(
-                            knowledge_dirs, r["source_dir"],
-                        ),
+                        "knowledge_dir": kd,
                         "entry_key": r["entry_key"],
+                        "level1_map": level1_maps.get(kd, {}),
                     })
 
                 with concurrent.futures.ThreadPoolExecutor(
@@ -318,6 +350,7 @@ def run_mapreduce_inference(
                         executor.submit(
                             _run_edge_case_fallback, task,
                             map_llm_func, edge_case_prompt_func,
+                            edge_cases_top_n, embedding_func,
                         ): task
                         for task in edge_tasks
                         if task["knowledge_dir"] is not None
@@ -484,7 +517,7 @@ def run_mapreduce_inference_file(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
-    enable_edge_case_fallback: bool = True,
+    edge_cases_top_n: int = 3,
     question_column: str = "question",
 ) -> str:
     """
@@ -508,6 +541,7 @@ def run_mapreduce_inference_file(
     input_path       : 输入文件路径（.csv / .xlsx）
     output_path      : 输出文件路径（.csv / .xlsx，格式以此为准）
     question_column  : 问题列名，默认 "question"
+    edge_cases_top_n : Phase 3 边缘案例检索 Top-N（0 = 禁用兜底）
     其余参数与 run_mapreduce_inference 一致
 
     Returns
@@ -547,7 +581,7 @@ def run_mapreduce_inference_file(
         tfidf_top_n=tfidf_top_n,
         embedding_top_n=embedding_top_n,
         map_max_workers=map_max_workers,
-        enable_edge_case_fallback=enable_edge_case_fallback,
+        edge_cases_top_n=edge_cases_top_n,
     )
 
     df = _append_results_to_df(df, results)

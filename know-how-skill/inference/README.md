@@ -4,7 +4,7 @@
 
 推理阶段基于 **检索增强推理（Retrieval-Augmented Reasoning）** 架构，将用户问题与抽取阶段产出的 Know-How 知识库进行匹配、校验和推理，最终生成高质量答案。
 
-核心流程：**知识指定 → 双路检索 → 并行 Map 推理（含有效性校验）→ 边缘案例兜底 → Reduce 融合**
+核心流程：**知识指定 → 双路检索 → 并行 Map 推理（含有效性校验）→ 边缘案例混合检索兜底 → Reduce 融合**
 
 ---
 
@@ -41,13 +41,15 @@
                        │
                        ▼
 ┌─────────────────────────────────────────────────┐
-│     Phase 3: 边缘案例兜底（仅 QA Know-How）         │
+│     Phase 3: 边缘案例混合检索兜底（仅 QA Know-How）  │
 │                                                   │
 │  当某条 QA Know-How 被判定为对当前问题无效时:         │
-│    1. 取该 cluster 的边缘案例（原始 QA 样本）         │
-│    2. 边缘案例作为参考素材交给 LLM 再做推理验证        │
-│    3. 有效 → 产出推理结果                            │
-│    4. 仍然无效 → 标记为不相关，不参与 Reduce          │
+│    1. 加载该 cluster 的全部边缘案例                  │
+│    2. 混合检索（TF-IDF + Dense）→ 取 Top-N 案例     │
+│    3. 加载关联的 Level-1 Know-How 作为辅助上下文      │
+│    4. 边缘案例 + Level-1 Know-How 交给 LLM 推理     │
+│    5. 有效 → 产出推理结果                            │
+│    6. 仍然无效 → 标记为不相关，不参与 Reduce          │
 │                                                   │
 │  注: Doc Know-How 不走此兜底，Map 判定无效即终止       │
 └──────────────────────┬──────────────────────────┘
@@ -58,8 +60,9 @@
 │                                                   │
 │  汇总所有有效 Map 推理结果:                          │
 │    1. 综合各候选答案的推理链                          │
-│    2. 融合分析，消解矛盾                             │
-│    3. 输出最终答案                                   │
+│    2. 额外 LLM 裸考推理（默认开启）作为补充参考        │
+│    3. 融合分析，消解矛盾                             │
+│    4. 输出最终答案                                   │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -96,9 +99,9 @@ python inference/run_infer.py \
     --question-column question \           # 问题列名（默认: question）
     --tfidf-top-n 5 \                      # TF-IDF 检索 Top-N（默认: 5）
     --embedding-top-n 5 \                  # Dense Embedding 检索 Top-N（默认: 5）
+    --edge-cases-top-n 3 \                 # Phase 3 边缘案例检索 Top-N（默认: 3，设为 0 禁用）
     --max-workers 4 \                      # 并发线程数（默认: 4）
-    --no-edge-fallback \                   # 禁用 Phase 3 边缘案例兜底
-    --no-extra-llm                         # 禁用 Reduce 阶段额外 LLM 信息
+    --no-extra-llm                         # 禁用 Reduce 阶段额外 LLM 裸考推理（默认开启）
 ```
 
 ---
@@ -108,7 +111,7 @@ python inference/run_infer.py \
 ```
 inference/
 ├── run_infer.py           # CLI 入口脚本
-├── retrieval.py           # Phase 1: 双路并行检索模块
+├── retrieval.py           # Phase 1: 双路并行检索模块 + Phase 3: 边缘案例混合检索
 ├── mapreduce_infer.py     # Phase 2/3/4: MapReduce 推理流水线
 ├── prompts_infer.py       # Prompt 模板（Map / Reduce / 边缘案例兜底）
 ├── __init__.py            # 模块导出
@@ -123,9 +126,9 @@ inference/
 
 | 模块 | 职责 |
 |------|------|
-| `retrieval.py` | 加载 `retrieval_index.json`，执行 TF-IDF + Dense 双路检索，多目录并行，query embedding 单次计算 |
-| `mapreduce_infer.py` | 4 阶段流水线编排；Map 推理、边缘案例兜底、Reduce 融合；文件 I/O（CSV/Excel 双格式） |
-| `prompts_infer.py` | `infer_v0/v1`（Map 推理）、`edge_case_fallback_v0`（Phase 3 兜底）、`summary_v0`（Reduce 融合）、`potential_pitfalls`（陷阱提示） |
+| `retrieval.py` | 加载 `retrieval_index.json`，执行 TF-IDF + Dense 双路检索，多目录并行，query embedding 单次计算；Phase 3 边缘案例混合检索（`retrieve_edge_cases`）；Level-1 Know-How 加载（`load_level1_knowhow_map`） |
+| `mapreduce_infer.py` | 4 阶段流水线编排；Map 推理、边缘案例混合检索兜底（含 Level-1 Know-How）、Reduce 融合；文件 I/O（CSV/Excel 双格式） |
+| `prompts_infer.py` | `infer_v0/v1`（Map 推理）、`edge_case_fallback_v0`（Phase 3 兜底，支持 Level-1 Know-How 上下文）、`summary_v0`（Reduce 融合）、`potential_pitfalls`（陷阱提示） |
 | `run_infer.py` | CLI 参数解析、路径解析、LLM/Embedding 服务加载、调用推理流水线 |
 
 ---
@@ -158,31 +161,38 @@ inference/
    - `有效`（Match_Status=YES）：返回推理链（Reasoning_Chain）+ 候选答案（Derived_Answer）→ 直接参与 Reduce
    - `无效`（Match_Status=NO）：返回拒绝原因（Rejection_Reason）→ QA 类型进入 Phase 3
 
-### Phase 3: 边缘案例兜底（仅 QA Know-How）
+### Phase 3: 边缘案例混合检索兜底（仅 QA Know-How）
 
 **触发条件**：某条 QA Know-How 在 Phase 2 被判定为无效。
 
 **设计动机**：抽取阶段的 Level 2 聚类精炼会将同簇样本压缩为结构化 Know-How，这个泛化过程可能丢失某些具体场景的细节。而被归为边缘案例（edge_cases）的原始 QA 样本恰好保留了这些未被抽象的具体知识——它们可能包含与用户问题直接相关的信息。
 
 **执行逻辑**（通过 `ThreadPoolExecutor` 并行）：
-1. 通过 `cluster_key` 从 `edge_cases.json` 中取出该 cluster 的边缘案例
-2. 将边缘案例作为 **参考素材** 连同用户问题一起交给 LLM（`edge_case_fallback_v0` prompt），再做一次推理验证
-3. 有效 → 产出推理结果，参与 Reduce
-4. 仍然无效 → 最终标记为不相关，不参与 Reduce
+1. 通过 `cluster_key` 从 `edge_cases.json` 中加载该 cluster 的全部边缘案例
+2. **混合检索**（TF-IDF token overlap + Dense Embedding cosine），筛选出与用户问题最相关的 **Top-N** 条边缘案例
+3. 从 `knowledge_traceback.json` 加载每个边缘案例关联的 **Level-1 Know-How**（一级提炼的泛化知识），作为辅助推理上下文
+4. 将 Top-N 边缘案例（含 Level-1 Know-How）作为参考素材，连同用户问题一起交给 LLM（`edge_case_fallback_v0` prompt），再做一次推理验证
+5. 有效 → 产出推理结果，参与 Reduce
+6. 仍然无效 → 最终标记为不相关，不参与 Reduce
+
+**与旧版的区别**：
+- **旧版**：全量加载 cluster 下所有边缘案例，直接发给 LLM，无检索筛选，不使用 Level-1 Know-How
+- **新版**：通过混合检索精选 Top-N 最相关的案例，减少噪声；同时补充 Level-1 Know-How 上下文，提升推理准确性
 
 **适用范围**：
 - **仅 QA Know-How** 走此兜底路径（有 `edge_cases.json`）
 - **Doc Know-How 不走边缘案例兜底**，Map 判定无效即为最终结论
-- 可通过 `--no-edge-fallback` 禁用
+- 可通过 `--edge-cases-top-n 0` 禁用
 
 ### Phase 4: Reduce 融合推理
 
 汇总 Phase 2 和 Phase 3 中所有标记为「有效」的推理结果：
 
 1. 整合来自不同知识源（不同 QA 文件、不同文档）的候选答案及推理链
-2. 分析各推理链的一致性与互补性
-3. 消解可能的矛盾结论
-4. 融合生成最终答案
+2. **额外 LLM 裸考推理**（默认开启）：直接向 LLM 提问获取基于模型自身知识的参考答案，作为 Reduce 的补充信息源
+3. 分析各推理链的一致性与互补性
+4. 消解可能的矛盾结论
+5. 融合生成最终答案
 
 ---
 
@@ -195,9 +205,9 @@ inference/
 ├── knowledge.json           # 最终知识库（知识块内容）          ← Phase 2 加载
 ├── retrieval_index.json     # 检索索引（TF-IDF + Dense 预计算向量）← Phase 1 加载
 ├── edge_cases.json          # 边缘案例库（仅 QA Know-How）     ← Phase 3 加载
+├── knowledge_traceback.json # 一级回溯（Level-1 Know-How）     ← Phase 3 加载（关联边缘案例的一级知识）
 ├── general_cases.json       # 通用案例库（仅 QA Know-How，备选参考）
-├── knowledge.md             # 知识概述（人工审核用，推理不直接使用）
-└── knowledge_traceback.json # 一级回溯（调试/审计用，推理不直接使用）
+└── knowledge.md             # 知识概述（人工审核用，推理不直接使用）
 ```
 
 ---
@@ -209,9 +219,10 @@ inference/
 | `knowledge_dirs` | `--knowledge-dirs` | 指定参与推理的 knowledge 目录列表 | 必填 |
 | `tfidf_top_n` | `--tfidf-top-n` | 路线 A (TF-IDF) 检索返回数量 | 5 |
 | `embedding_top_n` | `--embedding-top-n` | 路线 B (Dense Embedding) 检索返回数量 | 5 |
+| `edge_cases_top_n` | `--edge-cases-top-n` | Phase 3 边缘案例混合检索 Top-N（设为 0 禁用兜底） | 3 |
 | `map_max_workers` | `--max-workers` | Map / Phase 3 并发线程数 | 4 |
-| `enable_edge_case_fallback` | `--no-edge-fallback` | 是否启用边缘案例兜底 | True |
 | `question_column` | `--question-column` | 输入文件中问题列名 | question |
+| `no_extra_llm` | `--no-extra-llm` | 禁用 Reduce 阶段额外 LLM 裸考推理 | False（默认开启） |
 
 ---
 
@@ -229,6 +240,6 @@ inference/
 | `Total_Valid_Count` | 汇总 | 最终有效推理结果总数 |
 | `Map_Valid_Details` | Phase 2+3 | 所有有效推理中间结果（JSON，含每条的推理链和候选答案） |
 | `Map_Rejected_Reasons` | Phase 2 | 被拒绝的原因列表 |
-| `Extra_Information` | Phase 4 | 额外参考信息（裸考 LLM） |
+| `Extra_Information` | Phase 4 | 额外参考信息（LLM 裸考推理结果） |
 | `Reduce_Analysis` | Phase 4 | Reduce 融合分析过程 |
 | `Final_Inference_Answer` | Phase 4 | **最终推理答案** |
