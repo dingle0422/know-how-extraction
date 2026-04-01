@@ -362,6 +362,7 @@ def run_level2_refinement(
     embedding_func=None,
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
+    max_cluster_samples: int = 0,
 ):
     """
     V2 二级知识精炼入口。
@@ -380,6 +381,7 @@ def run_level2_refinement(
     embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
     tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
     embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
+    max_cluster_samples : 每个簇的最大样本数，超出部分拆分为新簇。0 表示不限制。
     """
     from clustering import make_clusters
     from case_store import save_general_cases
@@ -402,6 +404,7 @@ def run_level2_refinement(
         embedding_func=embedding_func,
         tfidf_weight=tfidf_weight,
         embedding_weight=embedding_weight,
+        max_cluster_samples=max_cluster_samples,
     )
 
     # ── 断点续传检查 ──────────────────────────────────────────────────────

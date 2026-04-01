@@ -140,12 +140,85 @@ def _build_hybrid_similarity(
     return S
 
 
+def _split_oversized_clusters(
+    raw_clusters: list[dict],
+    items: list[dict],
+    X: np.ndarray,
+    feature_names: np.ndarray,
+    max_cluster_samples: int,
+) -> list[dict]:
+    """将超过 max_cluster_samples 的簇按质心相似度倒排拆分为多个子簇。"""
+    final: list[dict] = []
+
+    for cluster in raw_clusters:
+        idx_list: list[int] = cluster["global_indices"]
+        if len(idx_list) <= max_cluster_samples:
+            final.append(cluster)
+            continue
+
+        remaining_idx = list(idx_list)
+        while len(remaining_idx) > max_cluster_samples:
+            meta = _cluster_metadata(remaining_idx, X, feature_names)
+            centroid_global = meta["centroid_item_idx"]
+            sim_map = meta["cosine_to_centroid"]
+
+            sorted_all = sorted(
+                remaining_idx,
+                key=lambda i: (0 if i == centroid_global else 1,
+                               -sim_map.get(i, 0.0)),
+            )
+
+            keep_idx = sorted_all[:max_cluster_samples]
+            overflow_idx = sorted_all[max_cluster_samples:]
+
+            keep_centroid = centroid_global
+            keep_others_sorted = [i for i in keep_idx if i != keep_centroid]
+            keep_others_sorted.sort(
+                key=lambda i: sim_map.get(i, 0.0), reverse=True
+            )
+
+            keep_meta = _cluster_metadata(keep_idx, X, feature_names)
+            final.append({
+                "items": [items[i] for i in keep_idx],
+                "centroid_item": items[keep_centroid],
+                "keywords": keep_meta["keywords"],
+                "cohesion": keep_meta["cohesion"],
+                "sorted_others": [items[i] for i in keep_others_sorted],
+                "tfidf_vectors": X[keep_idx],
+                "global_indices": keep_idx,
+            })
+
+            remaining_idx = overflow_idx
+
+        if remaining_idx:
+            sub_meta = _cluster_metadata(remaining_idx, X, feature_names)
+            sub_centroid = sub_meta["centroid_item_idx"]
+            sub_sim = sub_meta["cosine_to_centroid"]
+            sub_others = sorted(
+                [i for i in remaining_idx if i != sub_centroid],
+                key=lambda i: sub_sim.get(i, 0.0),
+                reverse=True,
+            )
+            final.append({
+                "items": [items[i] for i in remaining_idx],
+                "centroid_item": items[sub_centroid],
+                "keywords": sub_meta["keywords"],
+                "cohesion": sub_meta["cohesion"],
+                "sorted_others": [items[i] for i in sub_others],
+                "tfidf_vectors": X[remaining_idx],
+                "global_indices": remaining_idx,
+            })
+
+    return final
+
+
 def make_clusters(
     items: list[dict],
     cosine_threshold: float = 0.75,
     embedding_func: Callable | None = None,
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
+    max_cluster_samples: int = 0,
 ) -> list[dict]:
     """
     将 items 按相似度聚类，支持 TF-IDF / Dense Embedding / 混合三种模式。
@@ -164,6 +237,8 @@ def make_clusters(
                      为 None 时自动回退纯 TF-IDF。
     tfidf_weight : TF-IDF 相似度权重，默认 1.0。设为 0 跳过 TF-IDF 相似度计算。
     embedding_weight : Dense Embedding 相似度权重，默认 0.0。设为 0 跳过 Embedding 计算。
+    max_cluster_samples : 每个簇的最大样本数，超出部分按相似度倒排拆分为新簇。
+                          设为 0 或负数时不限制（向后兼容）。
 
     Returns
     -------
@@ -247,6 +322,19 @@ def make_clusters(
             "tfidf_vectors": X[idx_list],
             "global_indices": idx_list,
         })
+
+    # ── 超限簇拆分 ──────────────────────────────────────────────────────
+    if max_cluster_samples > 0:
+        oversized = [c for c in result if len(c["items"]) > max_cluster_samples]
+        if oversized:
+            pre_split = len(result)
+            result = _split_oversized_clusters(
+                result, items, X, feature_names, max_cluster_samples,
+            )
+            print(
+                f"[Level-2] 簇大小上限={max_cluster_samples}，"
+                f"{len(oversized)} 个超限簇被拆分 → 簇数 {pre_split} → {len(result)}"
+            )
 
     sizes = [len(c["items"]) for c in result]
     mode_desc = "纯TF-IDF"

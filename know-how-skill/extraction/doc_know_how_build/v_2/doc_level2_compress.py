@@ -225,6 +225,7 @@ def run_level2_compression_v2(
     embedding_func=None,
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
+    max_cluster_samples: int = 0,
 ):
     """
     V2 二级知识压缩入口（AgglomerativeClustering + 废料分流）。
@@ -243,6 +244,7 @@ def run_level2_compression_v2(
     embedding_func : Dense embedding 函数，为 None 时回退纯 TF-IDF
     tfidf_weight : TF-IDF 相似度权重，设为 0 跳过 TF-IDF
     embedding_weight : Dense Embedding 相似度权重，设为 0 跳过 Embedding
+    max_cluster_samples : 每个簇的最大样本数，超出部分拆分为新簇。0 表示不限制。
     """
     # ── 加载 + 分流 ──
     valid_items, waste_items = _load_and_triage_level1(
@@ -263,6 +265,7 @@ def run_level2_compression_v2(
         embedding_func=embedding_func,
         tfidf_weight=tfidf_weight,
         embedding_weight=embedding_weight,
+        max_cluster_samples=max_cluster_samples,
     )
 
     # ── 断点续传检查 ──
@@ -333,6 +336,7 @@ def run_full_pipeline_for_doc(
     embedding_func=None,
     tfidf_weight: float = 1.0,
     embedding_weight: float = 0.0,
+    max_cluster_samples: int = 0,
 ):
     """
     对单个源文档执行完整的 Level 1 → 废料分流 → 新聚类 → Level 2 → Knowledge 流水线。
@@ -386,6 +390,7 @@ def run_full_pipeline_for_doc(
         embedding_func=embedding_func,
         tfidf_weight=tfidf_weight,
         embedding_weight=embedding_weight,
+        max_cluster_samples=max_cluster_samples,
     )
 
     # ── Level 2 Markdown 预览 ──
@@ -486,6 +491,10 @@ if __name__ == "__main__":
         "--embedding-weight", type=float, default=0.0,
         help="聚类时 Dense Embedding 相似度权重 (默认 0.0，设为 0 跳过 Embedding)",
     )
+    parser.add_argument(
+        "--max-cluster-samples", type=int, default=20,
+        help="每个聚类簇的最大样本数，超出部分按相似度倒排拆分为新簇 (默认 20，设为 0 不限制)",
+    )
     args = parser.parse_args()
 
     input_dir = os.path.join(_PACKAGE_DIR, "input")
@@ -536,7 +545,8 @@ if __name__ == "__main__":
     print(f"  cosine_threshold={args.cosine_threshold}, "
           f"min_case_chars={args.min_case_chars}, "
           f"tfidf_weight={args.tfidf_weight}, "
-          f"embedding_weight={args.embedding_weight}")
+          f"embedding_weight={args.embedding_weight}, "
+          f"max_cluster_samples={args.max_cluster_samples}")
     print("=" * 60)
     for i, fp in enumerate(doc_files, 1):
         print(f"  {i}. {os.path.basename(fp)}")
@@ -561,6 +571,7 @@ if __name__ == "__main__":
             embedding_func=_emb_func,
             tfidf_weight=args.tfidf_weight,
             embedding_weight=args.embedding_weight,
+            max_cluster_samples=args.max_cluster_samples,
         )
 
     print(f"\n{'═' * 60}")
