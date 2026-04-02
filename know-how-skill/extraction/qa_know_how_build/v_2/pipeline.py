@@ -224,20 +224,10 @@ def run_full_pipeline_for_qa_v2(
         print(f"  [跳过] Knowledge 目录已存在: {knowledge_sub}")
     else:
         print(f"\n  [Knowledge] 发布到 knowledge 目录...")
-        _ext = os.path.splitext(source_file)[1].lower()
-        if _ext == ".csv":
-            with open(source_file, "r", encoding="utf-8") as f:
-                source_text_head = f.read(20000)
-        else:
-            source_text_head = data_train.head(200).to_string(
-                index=False, max_colwidth=120
-            )[:20000]
         publish_to_knowledge(
             source_stem=source_stem,
             final_json_path=level2_file,
             knowledge_base_dir=knowledge_dir,
-            llm_func=llm_func,
-            source_text_head=source_text_head,
             level1_json_path=level1_file,
         )
 

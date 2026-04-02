@@ -9,9 +9,33 @@ import copy
 import re
 
 _STEP_ID_RE = re.compile(r'^\d+(\.\d+)*$')
+_FOOTNOTE_RE = re.compile(r'\[(\d+(?:,\s*\d+)*)\]\s*$')
 
 
-def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict]]:
+def _extract_footnotes(action: str) -> list[int]:
+    """从 action 末尾的 [1,2,3] 角标中提取 QA 序号列表。"""
+    m = _FOOTNOTE_RE.search(action)
+    if m:
+        return [int(x.strip()) for x in m.group(1).split(",")]
+    return []
+
+
+def _strip_footnotes(action: str) -> str:
+    """移除 action 末尾的角标标记，返回纯文本。"""
+    return _FOOTNOTE_RE.sub("", action).rstrip()
+
+
+def append_qa_footnote(action: str, qa_index: int) -> str:
+    """在 action 末尾追加 QA 序号角标，保留已有序号并去重。"""
+    existing = _extract_footnotes(action)
+    base = _strip_footnotes(action)
+    if qa_index not in existing:
+        existing.append(qa_index)
+    return f"{base}[{','.join(str(x) for x in existing)}]"
+
+
+def apply_patch(know_how: dict, operations: list[dict],
+                qa_index: int | None = None) -> tuple[dict, list[dict]]:
     """
     对 know-how 执行一组结构化补丁操作。
 
@@ -19,6 +43,7 @@ def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict
     ----------
     know_how : 当前的结构化 know-how dict（会被深拷贝，不修改原对象）
     operations : LLM 输出的操作指令列表
+    qa_index : 触发本次 patch 的 QA 序号（用于溯源角标），为 None 时不追加角标
 
     Returns
     -------
@@ -42,6 +67,8 @@ def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict
             patch_log.append({
                 "seq": i, "op": op_type, "status": "applied", "detail": detail,
             })
+            if qa_index is not None:
+                _tag_affected_element(kh, op_raw, qa_index)
         except _PatchSkip as e:
             patch_log.append({
                 "seq": i, "op": op_type, "status": "skipped", "detail": str(e),
@@ -51,6 +78,44 @@ def apply_patch(know_how: dict, operations: list[dict]) -> tuple[dict, list[dict
         _sort_steps(kh["steps"])
 
     return kh, patch_log
+
+
+def _tag_affected_element(kh: dict, op: dict, qa_index: int):
+    """在受 patch 影响的元素上追加 QA 溯源角标。"""
+    op_type = op.get("op", "")
+
+    # ── Steps: 角标打在 action 字段 ──
+    if op_type in ("add_step", "modify_step"):
+        steps = kh.get("steps", [])
+        if op_type == "modify_step":
+            target = str(op.get("target", ""))
+        else:
+            target = str(op.get("new_step", {}).get("step", ""))
+        idx = _find_step_idx(steps, target)
+        if idx >= 0 and "action" in steps[idx]:
+            steps[idx]["action"] = append_qa_footnote(steps[idx]["action"], qa_index)
+
+    # ── Exceptions: 角标打在 then 字段 ──
+    elif op_type == "add_exception":
+        exceptions = kh.get("exceptions", [])
+        if exceptions and "then" in exceptions[-1]:
+            exceptions[-1]["then"] = append_qa_footnote(exceptions[-1]["then"], qa_index)
+    elif op_type == "modify_exception":
+        exceptions = kh.get("exceptions", [])
+        index = op.get("index")
+        if isinstance(index, int) and 0 <= index < len(exceptions) and "then" in exceptions[index]:
+            exceptions[index]["then"] = append_qa_footnote(exceptions[index]["then"], qa_index)
+
+    # ── Constraints: 角标打在字符串末尾 ──
+    elif op_type == "add_constraint":
+        constraints = kh.get("constraints", [])
+        if constraints:
+            constraints[-1] = append_qa_footnote(constraints[-1], qa_index)
+    elif op_type == "modify_constraint":
+        constraints = kh.get("constraints", [])
+        index = op.get("index")
+        if isinstance(index, int) and 0 <= index < len(constraints):
+            constraints[index] = append_qa_footnote(constraints[index], qa_index)
 
 
 class _PatchSkip(Exception):
@@ -115,6 +180,13 @@ def _op_modify_step(kh: dict, op: dict) -> str:
     changed_fields = []
     for field, value in updates.items():
         if field in ("step", "action", "condition", "outcome"):
+            if field == "action":
+                old_footnotes = _extract_footnotes(steps[idx].get("action", ""))
+                new_base = _strip_footnotes(str(value))
+                if old_footnotes:
+                    value = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
+                else:
+                    value = new_base
             steps[idx][field] = value
             changed_fields.append(field)
 
@@ -165,7 +237,15 @@ def _op_modify_exception(kh: dict, op: dict) -> str:
     changed = []
     for field in ("when", "then"):
         if field in updates:
-            exceptions[index][field] = updates[field]
+            if field == "then":
+                old_footnotes = _extract_footnotes(exceptions[index].get("then", ""))
+                new_base = _strip_footnotes(str(updates[field]))
+                if old_footnotes:
+                    exceptions[index][field] = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
+                else:
+                    exceptions[index][field] = new_base
+            else:
+                exceptions[index][field] = updates[field]
             changed.append(field)
     if not changed:
         raise _PatchSkip("updates 中无合法字段")
@@ -197,7 +277,12 @@ def _op_modify_constraint(kh: dict, op: dict) -> str:
     _check_list_index(constraints, index, "constraints")
     if not new_value or not isinstance(new_value, str):
         raise _PatchSkip("new_value 缺失或非字符串")
-    constraints[index] = new_value
+    old_footnotes = _extract_footnotes(constraints[index])
+    new_base = _strip_footnotes(new_value)
+    if old_footnotes:
+        constraints[index] = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
+    else:
+        constraints[index] = new_base
     return f"修改 constraint[{index}]"
 
 

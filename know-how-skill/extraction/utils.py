@@ -19,8 +19,8 @@ def publish_to_knowledge(
     source_stem: str,
     final_json_path: str,
     knowledge_base_dir: str,
-    llm_func,
-    source_text_head: str,
+    llm_func=None,
+    source_text_head: str = "",
     level1_json_path: str = None,
     knowledge_desc_prompt_func=None,
 ):
@@ -30,7 +30,7 @@ def publish_to_knowledge(
     目录结构:
         {knowledge_base_dir}/{source_stem}_knowledge/
             ├── knowledge.json       (最终抽取结果副本)
-            ├── knowledge.md         (LLM 基于源文档头部生成的知识概述)
+            ├── knowledge.md         (Know-How 目录索引 + 全文内容)
             └── knowledge_traceback.json     (一级抽取结果，含源数据回溯信息，可选)
 
     Parameters
@@ -38,16 +38,11 @@ def publish_to_knowledge(
     source_stem            : 源文件名（不含扩展名）
     final_json_path        : 最终抽取结果 JSON 路径
     knowledge_base_dir     : knowledge 根目录（如 .../doc_know_how_build/knowledge）
-    llm_func               : LLM 调用函数
-    source_text_head       : 源文档头部文本（建议取前 2 万字）
+    llm_func               : （已废弃，保留兼容）
+    source_text_head       : （已废弃，保留兼容）
     level1_json_path       : 一级抽取结果 JSON 路径（含源数据回溯），可选
-    knowledge_desc_prompt_func : 生成 knowledge.md 的 prompt 函数
+    knowledge_desc_prompt_func : （已废弃，保留兼容）
     """
-    from prompts import knowledge_description_prompt as _default_prompt
-
-    if knowledge_desc_prompt_func is None:
-        knowledge_desc_prompt_func = _default_prompt
-
     sub_dir = os.path.join(knowledge_base_dir, f"{source_stem}_knowledge")
     os.makedirs(sub_dir, exist_ok=True)
 
@@ -60,21 +55,9 @@ def publish_to_knowledge(
         shutil.copy2(level1_json_path, dst_traceback)
         print(f"[Knowledge] 一级回溯文件已复制到: {dst_traceback}")
 
-    print("[Knowledge] 正在生成 knowledge.md（基于源文档头部摘要）...")
-    prompt = knowledge_desc_prompt_func(source_text_head)
-    try:
-        response = llm_func(prompt)
-        description = response.get("content", "") if isinstance(response, dict) else str(response)
-    except Exception as e:
-        description = f"（knowledge.md 自动生成失败: {e}）"
-        print(f"[Knowledge] 警告: knowledge.md 生成失败: {e}")
-
     md_path = os.path.join(sub_dir, "knowledge.md")
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(description)
-    print(f"[Knowledge] 知识描述文件已生成: {md_path}")
-
-    append_knowhow_content_to_md(dst_json, md_path)
+    print("[Knowledge] 正在生成 knowledge.md（目录索引 + 全文内容）...")
+    write_knowhow_md_with_toc(dst_json, md_path)
 
     return sub_dir
 
@@ -122,14 +105,30 @@ def _render_structured_kh(kh: dict) -> str:
     return "\n".join(lines)
 
 
-def append_knowhow_content_to_md(knowledge_json_path: str, knowledge_md_path: str):
+def _extract_title_from_text(text: str) -> str:
+    """从渲染后的文本块中提取标题（第一个 Markdown heading 或首行非空文本）。"""
+    import re as _re
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("#"):
+            return _re.sub(r'^#+\s*', '', line).strip()
+        if line:
+            return line[:80]
+    return "未命名"
+
+
+def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
     """
-    读取 knowledge.json，将所有 know-how 内容转为文本追加到 knowledge.md 末尾，
-    并在最后添加总字数统计。
+    读取 knowledge.json，生成带目录索引的 knowledge.md。
+
+    文件结构：
+      1. Know-How 目录（标题 + 对应行号）
+      2. Know-How 全文内容
+      3. 统计信息
 
     自动检测两种格式：
-      - Doc compression 格式: Final_Know_How (list[str])
       - QA v2 结构化格式: know_how (dict with title/steps/...)
+      - Doc compression 格式: Final_Know_How (list[str])
     """
     try:
         with open(knowledge_json_path, "r", encoding="utf-8") as f:
@@ -137,20 +136,19 @@ def append_knowhow_content_to_md(knowledge_json_path: str, knowledge_md_path: st
     except Exception:
         return
 
-    kh_texts = []
+    kh_blocks = []
 
     for key in sorted(data.keys(), key=lambda x: int(x) if x.isdigit() else x):
         entry = data[key]
-        if entry.get("status") != "success":
+        if not isinstance(entry, dict) or entry.get("status") != "success":
             continue
 
-        # QA v2 结构化格式
         if "know_how" in entry and isinstance(entry["know_how"], dict):
             rendered = _render_structured_kh(entry["know_how"])
+            title = entry["know_how"].get("title", "未命名")
             if rendered.strip():
-                kh_texts.append(rendered)
+                kh_blocks.append((title, rendered))
 
-        # Doc compression 格式
         elif "Final_Know_How" in entry:
             fkh = entry["Final_Know_How"]
             if isinstance(fkh, str):
@@ -159,23 +157,54 @@ def append_knowhow_content_to_md(knowledge_json_path: str, knowledge_md_path: st
                 for topic in fkh:
                     topic = topic.strip()
                     if topic:
-                        kh_texts.append(topic)
+                        title = _extract_title_from_text(topic)
+                        kh_blocks.append((title, topic))
 
-    if not kh_texts:
+    if not kh_blocks:
+        with open(knowledge_md_path, "w", encoding="utf-8") as f:
+            f.write("# Know-How 知识目录\n\n> 暂无知识条目\n")
         return
 
-    total_content = "\n\n---\n\n".join(kh_texts)
-    total_chars = len(total_content)
+    # ── 构建全文内容区，并记录每个标题在内容区中的行偏移 ──────────────
+    content_lines = ["# Know-How 全文内容", ""]
+    title_offsets = []
 
-    with open(knowledge_md_path, "a", encoding="utf-8") as f:
-        f.write("\n\n---\n\n")
-        f.write("# Know-How 全文内容\n\n")
-        f.write(total_content)
-        f.write("\n\n---\n\n")
-        f.write(f"> **Know-How 总字数: {total_chars:,} 字 | 共 {len(kh_texts)} 条知识节点**\n")
+    for i, (title, text) in enumerate(kh_blocks):
+        if i > 0:
+            content_lines.append("---")
+            content_lines.append("")
+        title_offsets.append((title, len(content_lines)))
+        content_lines.extend(text.split("\n"))
+        content_lines.append("")
 
-    print(f"[Knowledge] Know-How 全文已追加到 knowledge.md "
-          f"({len(kh_texts)} 条, {total_chars:,} 字)")
+    total_chars = sum(len(text) for _, text in kh_blocks)
+    content_lines.append("---")
+    content_lines.append("")
+    content_lines.append(
+        f"> **Know-How 总字数: {total_chars:,} 字 | 共 {len(kh_blocks)} 条知识节点**"
+    )
+
+    # ── 构建目录区 ────────────────────────────────────────────────────────
+    toc_header = ["# Know-How 知识目录", ""]
+    toc_footer = ["", "---", ""]
+    toc_line_count = len(toc_header) + len(kh_blocks) + len(toc_footer)
+
+    toc_entries = []
+    for i, (title, offset_in_content) in enumerate(title_offsets):
+        actual_line = toc_line_count + offset_in_content + 1
+        toc_entries.append(f"{i + 1}. {title}  (行 {actual_line})")
+
+    # ── 组装并写入文件 ────────────────────────────────────────────────────
+    all_lines = toc_header + toc_entries + toc_footer + content_lines
+
+    with open(knowledge_md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(all_lines))
+        f.write("\n")
+
+    print(
+        f"[Knowledge] knowledge.md 已生成: {knowledge_md_path} "
+        f"({len(kh_blocks)} 条, {total_chars:,} 字)"
+    )
 
 
 # ─── 检索索引构建 ────────────────────────────────────────────────────────────

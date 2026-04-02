@@ -109,18 +109,58 @@ def _run_qa_direct_map_task(
     return result
 
 
+# ─── Phase 2c: LLM 裸考并行 Map 推理 ──────────────────────────────────────────
+
+def _run_llm_bare_map_task(
+    task_input: dict,
+    llm_func: Callable,
+    vendor: str = "volc",
+    model: str = "deepseek-v3.2",
+) -> dict:
+    """直接将原问题交给 LLM，用模型自身知识生成候选答案（与知识块 Map 并行）。"""
+    question = task_input["question"]
+    prompt = (
+        f"作为一个资深行业顾问，请结合你的专业知识，"
+        f"直接且详尽地解答以下问题：\n【用户问题】：{question}"
+    )
+    try:
+        raw_answer = llm_func(prompt, vendor=vendor, model=model)["content"]
+        result = {
+            "Match_Status": "YES",
+            "Rejection_Reason": "",
+            "Reasoning_Chain": "基于大模型自身专业知识的直接推理。",
+            "Derived_Answer": raw_answer,
+        }
+    except Exception as e:
+        result = {
+            "Match_Status": "NO",
+            "Rejection_Reason": f"LLM裸考推理失败: {e}",
+            "Reasoning_Chain": "",
+            "Derived_Answer": "",
+        }
+
+    result["q_idx"] = task_input["q_idx"]
+    result["source_dir"] = "llm_internal"
+    result["entry_key"] = "bare_llm"
+    result["knowledge_type"] = "llm_bare"
+    result["kh_source_id"] = "llm_bare_reasoning"
+    result["is_llm_bare"] = True
+    return result
+
+
 # ─── Phase 3: 边缘案例兜底 ──────────────────────────────────────────────────
 
 def _run_edge_case_fallback(
     task_input: dict,
     llm_func: Callable,
     edge_case_prompt_func: Callable,
-    edge_cases_top_n: int = 3,
+    tfidf_top_n: int = 5,
+    embedding_top_n: int = 5,
     embedding_func: Callable = None,
 ) -> dict:
     """对 QA Know-How 中 Map 判定无效的条目，用边缘案例做兜底推理。
 
-    改进: 通过混合检索（TF-IDF + Dense）筛选 top-N 最相关的边缘案例，
+    通过双路独立检索（TF-IDF Top-N + Dense Top-N → 并集去重）筛选最相关的边缘案例，
     并附带 Level-1 Know-How 作为辅助推理上下文。
     """
     question = task_input["question"]
@@ -147,7 +187,8 @@ def _run_edge_case_fallback(
 
     edge_cases = retrieve_edge_cases(
         question, all_edge_cases,
-        top_n=edge_cases_top_n,
+        tfidf_top_n=tfidf_top_n,
+        embedding_top_n=embedding_top_n,
         embedding_func=embedding_func,
     )
     if not edge_cases:
@@ -182,34 +223,20 @@ def _run_reduce_task(
     task_input: dict,
     llm_func: Callable,
     summary_prompt_func: Callable,
-    extra_llm_func: Callable = None,
-    extra_vendor: str = "volc",
-    extra_model: str = "deepseek-v3.2",
 ) -> dict:
-    """汇总所有有效 Map 推理结果，融合生成最终答案。"""
+    """汇总所有有效 Map 推理结果（含 LLM 裸考），融合生成最终答案。"""
     q_idx = task_input["q_idx"]
     question = task_input["question"]
     valid_results = task_input["valid_results"]
-
-    extra_info = ""
-    if extra_llm_func is not None:
-        try:
-            extra_prompt = (
-                f"作为一个资深行业顾问，请结合你的专业知识，"
-                f"直接且详尽地解答以下问题：\n【用户问题】：{question}"
-            )
-            extra_info = extra_llm_func(
-                extra_prompt, vendor=extra_vendor, model=extra_model,
-            )["content"]
-        except Exception as e:
-            extra_info = f"获取额外信息失败: {e}"
 
     if not valid_results:
         candidates_text = "【空】所有候选知识块均被判定为不相关，未匹配到有效 Know-How。"
     else:
         fragments = []
         for r in valid_results:
-            if r.get("is_qa_direct"):
+            if r.get("is_llm_bare"):
+                source_tag = "LLM裸考"
+            elif r.get("is_qa_direct"):
                 source_tag = "QA直检"
             elif r.get("is_edge_case_fallback"):
                 source_tag = "边缘案例兜底"
@@ -222,7 +249,7 @@ def _run_reduce_task(
             )
         candidates_text = "\n\n".join(fragments)
 
-    prompt = summary_prompt_func(question, extra_info, candidates_text)
+    prompt = summary_prompt_func(question, "", candidates_text)
 
     try:
         raw = llm_func(prompt)["content"]
@@ -234,7 +261,6 @@ def _run_reduce_task(
         }
 
     reduce_result["q_idx"] = q_idx
-    reduce_result["Extra_Information"] = extra_info
     return reduce_result
 
 
@@ -257,8 +283,8 @@ def run_mapreduce_inference(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
-    edge_cases_top_n: int = 3,
-    qa_direct_top_n: int = 3,
+    enable_edge_cases: bool = True,
+    enable_qa_direct: bool = True,
 ) -> list[dict]:
     """
     完整 MapReduce 推理流水线（含 QA 直检并行路径）。
@@ -276,11 +302,11 @@ def run_mapreduce_inference(
     pitfalls_func            : 陷阱提示函数，可选
     extra_llm_func           : 额外信息 LLM 函数（裸考），可选
     embedding_func           : Dense embedding 函数，可选
-    tfidf_top_n              : TF-IDF 检索 Top-N
-    embedding_top_n          : Dense Embedding 检索 Top-N
+    tfidf_top_n              : 所有双路检索共享的 TF-IDF Top-N
+    embedding_top_n          : 所有双路检索共享的 Dense Embedding Top-N
     map_max_workers          : Map 阶段并发线程数
-    edge_cases_top_n         : Phase 3 边缘案例检索 Top-N（0 = 禁用）
-    qa_direct_top_n          : QA 直检 Top-N（0 = 禁用）
+    enable_edge_cases        : 是否启用 Phase 3 边缘案例兜底（默认开启）
+    enable_qa_direct         : 是否启用 QA 直检并行路径（默认开启）
 
     Returns
     -------
@@ -291,7 +317,7 @@ def run_mapreduce_inference(
 
     # ── 预加载 Level-1 Know-How 映射（用于 Phase 3 边缘案例兜底）──
     level1_maps: dict[str, dict[int, str]] = {}
-    if edge_cases_top_n > 0 and edge_case_prompt_func is not None:
+    if enable_edge_cases and edge_case_prompt_func is not None:
         for d in knowledge_dirs:
             l1 = load_level1_knowhow_map(d)
             if l1:
@@ -302,7 +328,7 @@ def run_mapreduce_inference(
 
     # ── 预加载 QA 直检 Retriever（仅 QA 类目录）──
     qa_direct_retrievers: list[QADirectRetriever] = []
-    if qa_direct_top_n > 0 and qa_direct_prompt_func is not None:
+    if enable_qa_direct and qa_direct_prompt_func is not None:
         for d in knowledge_dirs:
             traceback_path = os.path.join(d, "knowledge_traceback.json")
             ktype_path = os.path.join(d, "retrieval_index.json")
@@ -353,7 +379,8 @@ def run_mapreduce_inference(
                     pass
             qa_direct_hits = retrieve_qa_direct_candidates(
                 question, qa_direct_retrievers,
-                top_n=qa_direct_top_n,
+                tfidf_top_n=tfidf_top_n,
+                embedding_top_n=embedding_top_n,
                 query_embedding=query_emb,
             )
 
@@ -395,9 +422,10 @@ def run_mapreduce_inference(
             all_output.append(_build_empty_result(q_idx, question))
             continue
 
-        # ── Phase 2: 并行 Map 推理（Level-2 知识块 + QA 直检同时进行）──
+        # ── Phase 2: 并行 Map 推理（Level-2 知识块 + QA 直检 + LLM 裸考 同时进行）──
         map_results = []
         qa_direct_results = []
+        llm_bare_result = None
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=map_max_workers,
         ) as executor:
@@ -415,15 +443,26 @@ def run_mapreduce_inference(
                 ): ("qd", task)
                 for task in qa_direct_tasks
             }
-            all_futures = {**l2_futures, **qd_futures}
+            bare_futures = {}
+            if extra_llm_func is not None:
+                bare_task = {"q_idx": q_idx, "question": question}
+                bare_futures = {
+                    executor.submit(
+                        _run_llm_bare_map_task, bare_task,
+                        extra_llm_func, extra_vendor, extra_model,
+                    ): ("bare", bare_task)
+                }
+            all_futures = {**l2_futures, **qd_futures, **bare_futures}
             for future in concurrent.futures.as_completed(all_futures):
                 tag, _task = all_futures[future]
                 try:
                     result = future.result()
                     if tag == "l2":
                         map_results.append(result)
-                    else:
+                    elif tag == "qd":
                         qa_direct_results.append(result)
+                    else:
+                        llm_bare_result = result
                 except Exception as exc:
                     print(f"[-] Map 异常 (q_idx={q_idx}, type={tag}): {exc}")
 
@@ -439,9 +478,12 @@ def run_mapreduce_inference(
         ]
         valid_results.extend(qa_direct_valid)
 
+        if llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES":
+            valid_results.append(llm_bare_result)
+
         # ── Phase 3: 边缘案例兜底（仅 QA Know-How）──────────────────
         edge_fallback_results = []
-        if edge_cases_top_n > 0 and edge_case_prompt_func is not None:
+        if enable_edge_cases and edge_case_prompt_func is not None:
             qa_rejected = [
                 r for r in rejected_results
                 if r.get("knowledge_type") == "qa_v2"
@@ -468,7 +510,7 @@ def run_mapreduce_inference(
                         executor.submit(
                             _run_edge_case_fallback, task,
                             map_llm_func, edge_case_prompt_func,
-                            edge_cases_top_n, embedding_func,
+                            tfidf_top_n, embedding_top_n, embedding_func,
                         ): task
                         for task in edge_tasks
                         if task["knowledge_dir"] is not None
@@ -490,8 +532,12 @@ def run_mapreduce_inference(
         }
         reduce_result = _run_reduce_task(
             reduce_input, reduce_llm_func, summary_prompt_func,
-            extra_llm_func, extra_vendor, extra_model,
         )
+
+        # 向后兼容：将 LLM 裸考的回答填入 extra_information 列
+        llm_bare_answer = ""
+        if llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES":
+            llm_bare_answer = llm_bare_result.get("Derived_Answer", "")
 
         # ── 组装输出 ───────────────────────────────────────────────────
         all_output.append({
@@ -519,7 +565,7 @@ def run_mapreduce_inference(
                 for r in map_results
                 if r.get("Match_Status") != "YES"
             ],
-            "extra_information": reduce_result.get("Extra_Information", ""),
+            "extra_information": llm_bare_answer,
             "synthesis_analysis": reduce_result.get("Synthesis_Analysis", ""),
             "final_answer": reduce_result.get("Final_Answer", ""),
         })
@@ -646,8 +692,8 @@ def run_mapreduce_inference_file(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
-    edge_cases_top_n: int = 3,
-    qa_direct_top_n: int = 3,
+    enable_edge_cases: bool = True,
+    enable_qa_direct: bool = True,
     question_column: str = "question",
 ) -> str:
     """
@@ -670,11 +716,13 @@ def run_mapreduce_inference_file(
 
     Parameters
     ----------
-    input_path        : 输入文件路径（.csv / .xlsx）
-    output_path       : 输出文件路径（.csv / .xlsx，格式以此为准）
-    question_column   : 问题列名，默认 "question"
-    edge_cases_top_n  : Phase 3 边缘案例检索 Top-N（0 = 禁用兜底）
-    qa_direct_top_n   : QA 直检 Top-N（0 = 禁用）
+    input_path         : 输入文件路径（.csv / .xlsx）
+    output_path        : 输出文件路径（.csv / .xlsx，格式以此为准）
+    question_column    : 问题列名，默认 "question"
+    tfidf_top_n        : 所有双路检索共享的 TF-IDF Top-N
+    embedding_top_n    : 所有双路检索共享的 Dense Embedding Top-N
+    enable_edge_cases  : 是否启用 Phase 3 边缘案例兜底
+    enable_qa_direct   : 是否启用 QA 直检并行路径
     其余参数与 run_mapreduce_inference 一致
 
     Returns
@@ -715,8 +763,8 @@ def run_mapreduce_inference_file(
         tfidf_top_n=tfidf_top_n,
         embedding_top_n=embedding_top_n,
         map_max_workers=map_max_workers,
-        edge_cases_top_n=edge_cases_top_n,
-        qa_direct_top_n=qa_direct_top_n,
+        enable_edge_cases=enable_edge_cases,
+        enable_qa_direct=enable_qa_direct,
     )
 
     df = _append_results_to_df(df, results)

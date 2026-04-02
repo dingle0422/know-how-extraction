@@ -23,7 +23,7 @@ for _p in (_V_DIR, _PACKAGE_DIR, _SKILL_ROOT, _EXTRACTION_DIR):
 
 from prompts import safe_parse_json_with_llm_repair
 from prompts_v2 import structured_kh_generate, kh_inference_validate, kh_minimal_update, kh_normalize_steps
-from patch_engine import apply_patch
+from patch_engine import apply_patch, append_qa_footnote
 from case_store import append_edge_cases
 
 _file_lock = Lock()
@@ -143,6 +143,16 @@ def _refine_single_cluster(
     know_how = _llm_call_with_retry(llm_func, prompt, parse_json=True,
                                      max_retries=max_retries_per_step)
 
+    _ci = centroid["index"]
+    for _step in know_how.get("steps", []):
+        if "action" in _step:
+            _step["action"] = append_qa_footnote(_step["action"], _ci)
+    for _exc in know_how.get("exceptions", []):
+        if "then" in _exc:
+            _exc["then"] = append_qa_footnote(_exc["then"], _ci)
+    for _j, _con in enumerate(know_how.get("constraints", [])):
+        know_how["constraints"][_j] = append_qa_footnote(_con, _ci)
+
     refinement_log = [{
         "index": centroid["index"],
         "role": "centroid",
@@ -201,7 +211,7 @@ def _refine_single_cluster(
             diff_desc = update_result.get("diff_description", "")
 
             if ops:
-                know_how, patch_log = apply_patch(know_how, ops)
+                know_how, patch_log = apply_patch(know_how, ops, qa_index=s_idx)
                 applied = [p for p in patch_log if p["status"] == "applied"]
                 skipped = [p for p in patch_log if p["status"] == "skipped"]
                 if skipped:

@@ -404,28 +404,27 @@ def load_level1_knowhow_map(knowledge_dir: str) -> dict[int, str]:
 def retrieve_edge_cases(
     question: str,
     edge_cases: list[dict],
-    top_n: int = 3,
+    tfidf_top_n: int = 5,
+    embedding_top_n: int = 5,
     embedding_func: Callable = None,
 ) -> list[dict]:
-    """对单个 cluster 的边缘案例执行混合检索，返回 top-N 最相关的案例。
+    """对单个 cluster 的边缘案例执行双路独立检索，返回去重后的候选案例。
 
-    检索策略:
-      1. TF-IDF: jieba 分词后计算 token overlap cosine（轻量级，无需预构建索引）
-      2. Dense Embedding: 若提供 embedding_func，计算语义相似度
-      3. 两路分数相加，取 top-N
+    检索策略（与 Level-2 知识块检索一致）:
+      1. TF-IDF: jieba 分词后计算 token overlap cosine → 独立 Top-N
+      2. Dense Embedding: 若提供 embedding_func，计算语义相似度 → 独立 Top-N
+      3. 两路结果取并集，按索引去重（保留最高分）
     """
-    if not edge_cases or top_n <= 0:
+    if not edge_cases or (tfidf_top_n <= 0 and embedding_top_n <= 0):
         return []
-    if len(edge_cases) <= top_n:
-        return edge_cases
 
     tokenizer = _build_jieba_tokenizer()
     q_tokens = tokenizer(question)
     q_token_set = set(q_tokens)
 
-    tfidf_scores: list[float] = []
+    tfidf_scored: list[tuple[int, float]] = []
     ec_question_texts: list[str] = []
-    for ec in edge_cases:
+    for i, ec in enumerate(edge_cases):
         inp = ec.get("input", {})
         ec_q = inp.get("question", ec.get("question", ""))
         ec_a = inp.get("answer", ec.get("answer", ""))
@@ -433,30 +432,39 @@ def retrieve_edge_cases(
         ec_text = f"{ec_q} {ec_a}"
         ec_token_set = set(tokenizer(ec_text))
         if not ec_token_set or not q_token_set:
-            tfidf_scores.append(0.0)
+            score = 0.0
         else:
             overlap = q_token_set & ec_token_set
-            tfidf_scores.append(
-                len(overlap) / math.sqrt(len(q_token_set) * len(ec_token_set))
-            )
+            score = len(overlap) / math.sqrt(len(q_token_set) * len(ec_token_set))
+        if score > 0:
+            tfidf_scored.append((i, score))
 
-    dense_scores = [0.0] * len(edge_cases)
-    if embedding_func is not None:
+    tfidf_scored.sort(key=lambda x: x[1], reverse=True)
+    tfidf_top = tfidf_scored[:tfidf_top_n] if tfidf_top_n > 0 else []
+
+    dense_top: list[tuple[int, float]] = []
+    if embedding_top_n > 0 and embedding_func is not None:
         try:
             all_texts = [question] + ec_question_texts
             embeddings = embedding_func(all_texts)
             q_emb = embeddings[0]
+            dense_scored = []
             for i in range(len(edge_cases)):
-                dense_scores[i] = _cosine_dense(q_emb, embeddings[i + 1])
+                sim = _cosine_dense(q_emb, embeddings[i + 1])
+                if sim > 0:
+                    dense_scored.append((i, sim))
+            dense_scored.sort(key=lambda x: x[1], reverse=True)
+            dense_top = dense_scored[:embedding_top_n]
         except Exception as e:
             print(f"[Retrieval] Edge case dense embedding 失败: {e}")
 
-    combined = [
-        (i, tfidf_scores[i] + dense_scores[i])
-        for i in range(len(edge_cases))
-    ]
-    combined.sort(key=lambda x: x[1], reverse=True)
-    return [edge_cases[i] for i, _ in combined[:top_n]]
+    seen: dict[int, float] = {}
+    for idx, score in tfidf_top + dense_top:
+        if idx not in seen or score > seen[idx]:
+            seen[idx] = score
+
+    ranked = sorted(seen.items(), key=lambda x: x[1], reverse=True)
+    return [edge_cases[idx] for idx, _ in ranked]
 
 
 def format_edge_cases_text(
@@ -556,38 +564,50 @@ class QADirectRetriever:
     def search(
         self,
         question: str,
-        top_n: int = 3,
+        tfidf_top_n: int = 5,
+        embedding_top_n: int = 5,
         query_embedding: list[float] | None = None,
     ) -> list[dict]:
-        """混合检索 top-N 最相关的原始 QA 对。"""
-        if not self.qa_pairs or top_n <= 0:
+        """双路独立检索 top-N，取并集去重（与 Level-2 知识块检索一致）。"""
+        if not self.qa_pairs:
+            return []
+        if tfidf_top_n <= 0 and embedding_top_n <= 0:
             return []
 
         q_tokens = set(self._tokenizer(question))
 
-        tfidf_scores = []
-        for ts in self._qa_token_sets:
-            if not ts or not q_tokens:
-                tfidf_scores.append(0.0)
-            else:
+        tfidf_top: list[tuple[int, float]] = []
+        if tfidf_top_n > 0 and q_tokens:
+            tfidf_scored: list[tuple[int, float]] = []
+            for i, ts in enumerate(self._qa_token_sets):
+                if not ts:
+                    continue
                 overlap = q_tokens & ts
-                tfidf_scores.append(
-                    len(overlap) / math.sqrt(len(q_tokens) * len(ts))
-                )
+                score = len(overlap) / math.sqrt(len(q_tokens) * len(ts))
+                if score > 0:
+                    tfidf_scored.append((i, score))
+            tfidf_scored.sort(key=lambda x: x[1], reverse=True)
+            tfidf_top = tfidf_scored[:tfidf_top_n]
 
-        dense_scores = [0.0] * len(self.qa_pairs)
-        if query_embedding is not None and self._qa_embeddings is not None:
+        dense_top: list[tuple[int, float]] = []
+        if embedding_top_n > 0 and query_embedding is not None and self._qa_embeddings is not None:
+            dense_scored: list[tuple[int, float]] = []
             for i, emb in enumerate(self._qa_embeddings):
-                dense_scores[i] = _cosine_dense(query_embedding, emb)
+                sim = _cosine_dense(query_embedding, emb)
+                if sim > 0:
+                    dense_scored.append((i, sim))
+            dense_scored.sort(key=lambda x: x[1], reverse=True)
+            dense_top = dense_scored[:embedding_top_n]
 
-        combined = [
-            (i, tfidf_scores[i] + dense_scores[i])
-            for i in range(len(self.qa_pairs))
-        ]
-        combined.sort(key=lambda x: x[1], reverse=True)
+        seen: dict[int, float] = {}
+        for idx, score in tfidf_top + dense_top:
+            if idx not in seen or score > seen[idx]:
+                seen[idx] = score
+
+        ranked = sorted(seen.items(), key=lambda x: x[1], reverse=True)
 
         results = []
-        for idx, score in combined[:top_n]:
+        for idx, score in ranked:
             p = self.qa_pairs[idx]
             results.append({
                 "source_dir": self.dir_name,
@@ -605,13 +625,19 @@ class QADirectRetriever:
 def retrieve_qa_direct_candidates(
     question: str,
     qa_retrievers: list[QADirectRetriever],
-    top_n: int = 3,
+    tfidf_top_n: int = 5,
+    embedding_top_n: int = 5,
     query_embedding: list[float] | None = None,
 ) -> list[dict]:
-    """对多个 QA 目录执行 QA 直检，汇总去重后返回全局 top-N。"""
+    """对多个 QA 目录执行 QA 直检，汇总去重后返回候选列表。"""
     all_hits: list[dict] = []
     for ret in qa_retrievers:
-        all_hits.extend(ret.search(question, top_n=top_n, query_embedding=query_embedding))
+        all_hits.extend(ret.search(
+            question,
+            tfidf_top_n=tfidf_top_n,
+            embedding_top_n=embedding_top_n,
+            query_embedding=query_embedding,
+        ))
 
     all_hits.sort(key=lambda x: x["score"], reverse=True)
 
@@ -624,7 +650,7 @@ def retrieve_qa_direct_candidates(
         seen.add(uid)
         deduplicated.append(h)
 
-    return deduplicated[:top_n]
+    return deduplicated
 
 
 def format_qa_direct_text(qa_hit: dict) -> str:

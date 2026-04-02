@@ -107,12 +107,12 @@ def main():
         help="Map/Phase3 并发线程数（默认: 4）",
     )
     parser.add_argument(
-        "--edge-cases-top-n", type=int, default=3,
-        help="Phase 3 边缘案例混合检索 Top-N（默认: 3，设为 0 禁用兜底）",
+        "--no-edge-cases", action="store_true",
+        help="禁用 Phase 3 边缘案例兜底（默认开启）",
     )
     parser.add_argument(
-        "--qa-direct-top-n", type=int, default=3,
-        help="QA 直检 Top-N：并行检索原始 QA 对 + Level-1 Know-How（默认: 3，设为 0 禁用）",
+        "--no-qa-direct", action="store_true",
+        help="禁用 QA 直检并行路径（默认开启）",
     )
     parser.add_argument(
         "--no-extra-llm", action="store_true",
@@ -172,7 +172,9 @@ def main():
 
     from inference.mapreduce_infer import run_mapreduce_inference_file
 
-    qa_direct_prompt = qa_direct_infer_v0 if args.qa_direct_top_n > 0 else None
+    enable_edge = not args.no_edge_cases
+    enable_qa_direct = not args.no_qa_direct
+    qa_direct_prompt = qa_direct_infer_v0 if enable_qa_direct else None
 
     run_mapreduce_inference_file(
         knowledge_dirs=knowledge_dirs,
@@ -190,8 +192,8 @@ def main():
         tfidf_top_n=args.tfidf_top_n,
         embedding_top_n=args.embedding_top_n,
         map_max_workers=args.max_workers,
-        edge_cases_top_n=args.edge_cases_top_n,
-        qa_direct_top_n=args.qa_direct_top_n,
+        enable_edge_cases=enable_edge,
+        enable_qa_direct=enable_qa_direct,
         question_column=args.question_column,
     )
 

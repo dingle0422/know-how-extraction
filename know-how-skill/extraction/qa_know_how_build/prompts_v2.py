@@ -341,7 +341,7 @@ def kh_normalize_steps(know_how_json: str) -> str:
 
 # 核心原则
 - **只调整步骤的 `step` 编号值和数组中的排列顺序**。
-- **不修改任何步骤的 action、condition、outcome 文本内容**。
+- **不修改任何步骤的 action、condition、outcome 文本内容**（包括 action 末尾形如 `[1,2,3]` 的溯源角标，必须原样保留）。
 - **不增删步骤**，只做重新编号和排序。
 
 # 编号规范（严格遵守 — 数字+点号分级体系）
