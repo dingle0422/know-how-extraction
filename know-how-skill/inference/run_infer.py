@@ -111,6 +111,10 @@ def main():
         help="Phase 3 边缘案例混合检索 Top-N（默认: 3，设为 0 禁用兜底）",
     )
     parser.add_argument(
+        "--qa-direct-top-n", type=int, default=3,
+        help="QA 直检 Top-N：并行检索原始 QA 对 + Level-1 Know-How（默认: 3，设为 0 禁用）",
+    )
+    parser.add_argument(
         "--no-extra-llm", action="store_true",
         help="禁用 Reduce 阶段额外 LLM 裸考推理（默认开启）",
     )
@@ -149,7 +153,7 @@ def main():
         print(f"[!] 无法加载 llm_client: {e}")
         sys.exit(1)
 
-    from prompts_infer import infer_v1, summary_v0, potential_pitfalls, edge_case_fallback_v0
+    from prompts_infer import infer_v1, summary_v0, potential_pitfalls, edge_case_fallback_v0, qa_direct_infer_v0
 
     embedding_func = None
     try:
@@ -168,6 +172,8 @@ def main():
 
     from inference.mapreduce_infer import run_mapreduce_inference_file
 
+    qa_direct_prompt = qa_direct_infer_v0 if args.qa_direct_top_n > 0 else None
+
     run_mapreduce_inference_file(
         knowledge_dirs=knowledge_dirs,
         input_path=input_path,
@@ -177,6 +183,7 @@ def main():
         infer_prompt_func=infer_v1,
         summary_prompt_func=summary_v0,
         edge_case_prompt_func=edge_case_fallback_v0,
+        qa_direct_prompt_func=qa_direct_prompt,
         pitfalls_func=potential_pitfalls,
         extra_llm_func=extra_llm_func,
         embedding_func=embedding_func,
@@ -184,6 +191,7 @@ def main():
         embedding_top_n=args.embedding_top_n,
         map_max_workers=args.max_workers,
         edge_cases_top_n=args.edge_cases_top_n,
+        qa_direct_top_n=args.qa_direct_top_n,
         question_column=args.question_column,
     )
 

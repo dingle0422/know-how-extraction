@@ -21,6 +21,9 @@ from .retrieval import (
     load_level1_knowhow_map,
     retrieve_edge_cases,
     format_edge_cases_text,
+    QADirectRetriever,
+    retrieve_qa_direct_candidates,
+    format_qa_direct_text,
 )
 
 
@@ -69,6 +72,40 @@ def _run_map_task(
     result["entry_key"] = task_input["entry_key"]
     result["knowledge_type"] = task_input["knowledge_type"]
     result["kh_source_id"] = f"{task_input['source_dir']}:{task_input['entry_key']}"
+    return result
+
+
+# ─── Phase 2b: QA 直检并行 Map 推理 ──────────────────────────────────────────
+
+def _run_qa_direct_map_task(
+    task_input: dict,
+    llm_func: Callable,
+    qa_direct_prompt_func: Callable,
+    pitfalls_func: Callable = None,
+) -> dict:
+    """对单条 QA 直检命中的原始 QA 对执行 Map 推理。"""
+    question = task_input["question"]
+    qa_text = task_input["qa_text"]
+
+    try:
+        pp = pitfalls_func() if pitfalls_func is not None else ""
+        prompt = qa_direct_prompt_func(question, qa_text, pp)
+        raw = llm_func(prompt)["content"]
+        result = json.loads(_clean_json_string(raw))
+    except Exception as e:
+        result = {
+            "Match_Status": "NO",
+            "Rejection_Reason": f"QA 直检推理失败: {e}",
+            "Reasoning_Chain": "",
+            "Derived_Answer": "",
+        }
+
+    result["q_idx"] = task_input["q_idx"]
+    result["source_dir"] = task_input["source_dir"]
+    result["qa_index"] = task_input["qa_index"]
+    result["knowledge_type"] = "qa_direct"
+    result["kh_source_id"] = f"{task_input['source_dir']}:qa_{task_input['qa_index']}"
+    result["is_qa_direct"] = True
     return result
 
 
@@ -172,7 +209,12 @@ def _run_reduce_task(
     else:
         fragments = []
         for r in valid_results:
-            source_tag = "边缘案例兜底" if r.get("is_edge_case_fallback") else "知识块"
+            if r.get("is_qa_direct"):
+                source_tag = "QA直检"
+            elif r.get("is_edge_case_fallback"):
+                source_tag = "边缘案例兜底"
+            else:
+                source_tag = "知识块"
             fragments.append(
                 f"--- 来自{source_tag} [{r.get('kh_source_id')}] 的推理 ---\n"
                 f"推导逻辑: {r.get('Reasoning_Chain')}\n"
@@ -206,6 +248,7 @@ def run_mapreduce_inference(
     infer_prompt_func: Callable,
     summary_prompt_func: Callable,
     edge_case_prompt_func: Callable = None,
+    qa_direct_prompt_func: Callable = None,
     pitfalls_func: Callable = None,
     extra_llm_func: Callable = None,
     extra_vendor: str = "volc",
@@ -215,9 +258,10 @@ def run_mapreduce_inference(
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
     edge_cases_top_n: int = 3,
+    qa_direct_top_n: int = 3,
 ) -> list[dict]:
     """
-    完整 4 阶段 MapReduce 推理流水线。
+    完整 MapReduce 推理流水线（含 QA 直检并行路径）。
 
     Parameters
     ----------
@@ -228,6 +272,7 @@ def run_mapreduce_inference(
     infer_prompt_func        : Map prompt 构造函数
     summary_prompt_func      : Reduce prompt 构造函数
     edge_case_prompt_func    : Phase 3 边缘案例兜底 prompt 构造函数
+    qa_direct_prompt_func    : QA 直检 Map prompt 构造函数
     pitfalls_func            : 陷阱提示函数，可选
     extra_llm_func           : 额外信息 LLM 函数（裸考），可选
     embedding_func           : Dense embedding 函数，可选
@@ -235,6 +280,7 @@ def run_mapreduce_inference(
     embedding_top_n          : Dense Embedding 检索 Top-N
     map_max_workers          : Map 阶段并发线程数
     edge_cases_top_n         : Phase 3 边缘案例检索 Top-N（0 = 禁用）
+    qa_direct_top_n          : QA 直检 Top-N（0 = 禁用）
 
     Returns
     -------
@@ -254,6 +300,33 @@ def run_mapreduce_inference(
             total_l1 = sum(len(v) for v in level1_maps.values())
             print(f"[Infer] 已加载 Level-1 Know-How 映射: {total_l1} 条")
 
+    # ── 预加载 QA 直检 Retriever（仅 QA 类目录）──
+    qa_direct_retrievers: list[QADirectRetriever] = []
+    if qa_direct_top_n > 0 and qa_direct_prompt_func is not None:
+        for d in knowledge_dirs:
+            traceback_path = os.path.join(d, "knowledge_traceback.json")
+            ktype_path = os.path.join(d, "retrieval_index.json")
+            if not os.path.exists(traceback_path):
+                continue
+            is_qa = True
+            if os.path.exists(ktype_path):
+                try:
+                    import json as _j
+                    with open(ktype_path, "r", encoding="utf-8") as _f:
+                        kt = _j.load(_f).get("knowledge_type", "")
+                    is_qa = kt.startswith("qa")
+                except Exception:
+                    pass
+            if not is_qa:
+                continue
+            ret = QADirectRetriever(d, embedding_func=embedding_func)
+            if ret.qa_pairs:
+                qa_direct_retrievers.append(ret)
+        if qa_direct_retrievers:
+            total_qa = sum(len(r.qa_pairs) for r in qa_direct_retrievers)
+            print(f"[Infer] 已加载 QA 直检索引: {total_qa} 条原始 QA "
+                  f"(来自 {len(qa_direct_retrievers)} 个目录)")
+
     all_output = []
 
     for q_item in tqdm(questions, desc="Questions"):
@@ -269,7 +342,22 @@ def run_mapreduce_inference(
             embedding_func=embedding_func,
         )
 
-        if not candidates:
+        # ── Phase 1b: QA 直检并行检索 ─────────────────────────────────
+        qa_direct_hits = []
+        if qa_direct_retrievers:
+            query_emb = None
+            if embedding_func is not None:
+                try:
+                    query_emb = embedding_func([question])[0]
+                except Exception:
+                    pass
+            qa_direct_hits = retrieve_qa_direct_candidates(
+                question, qa_direct_retrievers,
+                top_n=qa_direct_top_n,
+                query_embedding=query_emb,
+            )
+
+        if not candidates and not qa_direct_hits:
             all_output.append(_build_empty_result(q_idx, question))
             continue
 
@@ -292,27 +380,52 @@ def run_mapreduce_inference(
                 "retrieval_score": cand["score"],
             })
 
-        if not map_tasks:
+        # 构建 QA 直检 Map 任务
+        qa_direct_tasks = []
+        for hit in qa_direct_hits:
+            qa_direct_tasks.append({
+                "q_idx": q_idx,
+                "question": question,
+                "source_dir": hit["source_dir"],
+                "qa_index": hit["qa_index"],
+                "qa_text": format_qa_direct_text(hit),
+            })
+
+        if not map_tasks and not qa_direct_tasks:
             all_output.append(_build_empty_result(q_idx, question))
             continue
 
-        # ── Phase 2: 并行 Map 推理 ─────────────────────────────────────
+        # ── Phase 2: 并行 Map 推理（Level-2 知识块 + QA 直检同时进行）──
         map_results = []
+        qa_direct_results = []
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=map_max_workers,
         ) as executor:
-            futures = {
+            l2_futures = {
                 executor.submit(
                     _run_map_task, task, map_llm_func,
                     infer_prompt_func, pitfalls_func,
-                ): task
+                ): ("l2", task)
                 for task in map_tasks
             }
-            for future in concurrent.futures.as_completed(futures):
+            qd_futures = {
+                executor.submit(
+                    _run_qa_direct_map_task, task, map_llm_func,
+                    qa_direct_prompt_func, pitfalls_func,
+                ): ("qd", task)
+                for task in qa_direct_tasks
+            }
+            all_futures = {**l2_futures, **qd_futures}
+            for future in concurrent.futures.as_completed(all_futures):
+                tag, _task = all_futures[future]
                 try:
-                    map_results.append(future.result())
+                    result = future.result()
+                    if tag == "l2":
+                        map_results.append(result)
+                    else:
+                        qa_direct_results.append(result)
                 except Exception as exc:
-                    print(f"[-] Map 异常 (q_idx={q_idx}): {exc}")
+                    print(f"[-] Map 异常 (q_idx={q_idx}, type={tag}): {exc}")
 
         valid_results = [
             r for r in map_results if r.get("Match_Status") == "YES"
@@ -320,6 +433,11 @@ def run_mapreduce_inference(
         rejected_results = [
             r for r in map_results if r.get("Match_Status") != "YES"
         ]
+
+        qa_direct_valid = [
+            r for r in qa_direct_results if r.get("Match_Status") == "YES"
+        ]
+        valid_results.extend(qa_direct_valid)
 
         # ── Phase 3: 边缘案例兜底（仅 QA Know-How）──────────────────
         edge_fallback_results = []
@@ -384,6 +502,8 @@ def run_mapreduce_inference(
             "map_match_count": len([
                 r for r in map_results if r.get("Match_Status") == "YES"
             ]),
+            "qa_direct_count": len(qa_direct_results),
+            "qa_direct_match_count": len(qa_direct_valid),
             "edge_fallback_count": len(edge_fallback_results),
             "edge_fallback_match_count": len([
                 r for r in edge_fallback_results
@@ -391,6 +511,7 @@ def run_mapreduce_inference(
             ]),
             "total_valid_count": len(valid_results),
             "map_results": map_results,
+            "qa_direct_results": qa_direct_results,
             "edge_fallback_results": edge_fallback_results,
             "valid_results": valid_results,
             "rejected_reasons": [
@@ -415,10 +536,13 @@ def _build_empty_result(q_idx: int, question: str) -> dict:
         "retrieval_candidates_count": 0,
         "map_total_evaluated": 0,
         "map_match_count": 0,
+        "qa_direct_count": 0,
+        "qa_direct_match_count": 0,
         "edge_fallback_count": 0,
         "edge_fallback_match_count": 0,
         "total_valid_count": 0,
         "map_results": [],
+        "qa_direct_results": [],
         "edge_fallback_results": [],
         "valid_results": [],
         "rejected_reasons": [],
@@ -469,6 +593,8 @@ def _append_results_to_df(df, results: list[dict]):
     df["Retrieval_Candidates"] = 0
     df["Map_Total_Evaluated"] = 0
     df["Map_Match_Count"] = 0
+    df["QA_Direct_Count"] = 0
+    df["QA_Direct_Match"] = 0
     df["Edge_Fallback_Count"] = 0
     df["Edge_Fallback_Match"] = 0
     df["Total_Valid_Count"] = 0
@@ -485,6 +611,8 @@ def _append_results_to_df(df, results: list[dict]):
         df.at[index, "Retrieval_Candidates"] = r["retrieval_candidates_count"]
         df.at[index, "Map_Total_Evaluated"] = r["map_total_evaluated"]
         df.at[index, "Map_Match_Count"] = r["map_match_count"]
+        df.at[index, "QA_Direct_Count"] = r["qa_direct_count"]
+        df.at[index, "QA_Direct_Match"] = r["qa_direct_match_count"]
         df.at[index, "Edge_Fallback_Count"] = r["edge_fallback_count"]
         df.at[index, "Edge_Fallback_Match"] = r["edge_fallback_match_count"]
         df.at[index, "Total_Valid_Count"] = r["total_valid_count"]
@@ -509,6 +637,7 @@ def run_mapreduce_inference_file(
     infer_prompt_func: Callable,
     summary_prompt_func: Callable,
     edge_case_prompt_func: Callable = None,
+    qa_direct_prompt_func: Callable = None,
     pitfalls_func: Callable = None,
     extra_llm_func: Callable = None,
     extra_vendor: str = "volc",
@@ -518,6 +647,7 @@ def run_mapreduce_inference_file(
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
     edge_cases_top_n: int = 3,
+    qa_direct_top_n: int = 3,
     question_column: str = "question",
 ) -> str:
     """
@@ -525,8 +655,10 @@ def run_mapreduce_inference_file(
 
     在输入数据的基础上追加以下列：
       - Retrieval_Candidates  : Phase 1 检索到的候选知识块数
-      - Map_Total_Evaluated   : Phase 2 实际评估的知识块数
+      - Map_Total_Evaluated   : Phase 2 实际评估的知识块数（Level-2 知识块）
       - Map_Match_Count       : Phase 2 判定有效的知识块数
+      - QA_Direct_Count       : QA 直检评估数
+      - QA_Direct_Match       : QA 直检命中数
       - Edge_Fallback_Count   : Phase 3 边缘案例兜底尝试数
       - Edge_Fallback_Match   : Phase 3 兜底成功数
       - Total_Valid_Count     : 最终有效推理结果总数
@@ -538,10 +670,11 @@ def run_mapreduce_inference_file(
 
     Parameters
     ----------
-    input_path       : 输入文件路径（.csv / .xlsx）
-    output_path      : 输出文件路径（.csv / .xlsx，格式以此为准）
-    question_column  : 问题列名，默认 "question"
-    edge_cases_top_n : Phase 3 边缘案例检索 Top-N（0 = 禁用兜底）
+    input_path        : 输入文件路径（.csv / .xlsx）
+    output_path       : 输出文件路径（.csv / .xlsx，格式以此为准）
+    question_column   : 问题列名，默认 "question"
+    edge_cases_top_n  : Phase 3 边缘案例检索 Top-N（0 = 禁用兜底）
+    qa_direct_top_n   : QA 直检 Top-N（0 = 禁用）
     其余参数与 run_mapreduce_inference 一致
 
     Returns
@@ -573,6 +706,7 @@ def run_mapreduce_inference_file(
         infer_prompt_func=infer_prompt_func,
         summary_prompt_func=summary_prompt_func,
         edge_case_prompt_func=edge_case_prompt_func,
+        qa_direct_prompt_func=qa_direct_prompt_func,
         pitfalls_func=pitfalls_func,
         extra_llm_func=extra_llm_func,
         extra_vendor=extra_vendor,
@@ -582,6 +716,7 @@ def run_mapreduce_inference_file(
         embedding_top_n=embedding_top_n,
         map_max_workers=map_max_workers,
         edge_cases_top_n=edge_cases_top_n,
+        qa_direct_top_n=qa_direct_top_n,
     )
 
     df = _append_results_to_df(df, results)

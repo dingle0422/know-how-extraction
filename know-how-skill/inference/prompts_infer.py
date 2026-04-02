@@ -192,6 +192,62 @@ def edge_case_fallback_v0(q, edge_cases_text):
 // 注意：如果判定为无效，则 Match_Status 为 "NO"，Reasoning_Chain 和 Derived_Answer 为空字符串。"""
 
 
+def qa_direct_infer_v0(q, qa_text, pp=""):
+    pitfalls_block = ""
+    if pp:
+        pitfalls_block = f"""
+<Potential_Pitfalls>
+{pp}
+</Potential_Pitfalls>
+"""
+    return f"""# Role
+你是一个极度严谨的"智能推理判别节点"。你的核心任务是基于【一条原始 QA 案例及其泛化知识（Level-1 Know-How）】来评估是否能回答【用户问题】。
+
+# Background
+在并发推理网络中，你收到的不是结构化 Know-How，而是一条**原始 QA 对**（来自真实业务场景）以及从中一级提炼出的**泛化知识（Level-1 Know-How）**。
+- **原始 QA**：包含一个具体问题和专家给出的详细回答，是特定场景下的真实业务知识。
+- **Level-1 Know-How**：是对该 QA 核心逻辑的高度概括，可帮助你理解其适用范畴。
+
+你需要综合两者，判断是否能为用户的问题提供有价值的答案。
+
+# Objective
+1. **相关性与充分性校验**：判断 `<QA_Reference>` 中的原始 QA 对和 Level-1 Know-How 是否与用户问题的核心诉求相关，且包含可用于回答的信息。
+2. **二元分支执行**：
+   - **分支 A（拒答）**：如果 QA 素材与用户问题无关或无法推导出有价值的答案 → NO
+   - **分支 B（解答）**：如果 QA 素材能提供有价值的信息 → YES，基于素材进行推理
+
+# Strict Constraints
+1. **信息隔离原则**：你**绝对不能**调用自身预训练的常识或外部知识。你唯一的信息来源是 `<QA_Reference>` 中提供的内容。
+2. **宁缺毋滥**：哪怕你自身知道答案，只要提供的素材推导不出，就必须拒答。
+3. **Level-1 Know-How 为辅助**：它帮助你理解适用范围，但推理结论需以原始 QA 的具体内容为准。
+
+# Input Data
+<User_Question>
+{q}
+</User_Question>
+
+<QA_Reference>
+{qa_text}
+</QA_Reference>
+{pitfalls_block}
+# Workflow
+1. **意图拆解**：分析用户问题的核心诉求。
+2. **匹配扫描**：审查原始 QA 对的问题和答案，结合 Level-1 Know-How，判断是否与用户问题相关。
+3. **断言裁决**：找到可用信息 → YES；找不到或关键信息缺失 → NO。
+{"4. **陷阱识别**：参考 `<Potential_Pitfalls>` 扫描用户问题中的风险点。" if pp else ""}
+
+# Output Format
+请严格按照以下 JSON 格式输出！不要包含额外的 Markdown 标记。**注意转义换行符 `\\n` 和双引号 `\\"`**。
+
+{{
+  "Match_Status": "YES",
+  "Rejection_Reason": "",
+  "Reasoning_Chain": "在原始 QA 中发现与用户问题直接相关的信息……",
+  "Derived_Answer": "根据参考案例，针对您的问题……"
+}}
+// 注意：如果判定为拒答，则 Match_Status 为 "NO"，Reasoning_Chain 和 Derived_Answer 为空字符串 ""，并在 Rejection_Reason 中填入理由。"""
+
+
 def potential_pitfalls():
     return """[
     {{

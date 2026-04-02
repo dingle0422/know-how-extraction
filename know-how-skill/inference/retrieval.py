@@ -484,3 +484,155 @@ def format_edge_cases_text(
         parts.append("\n".join(lines))
 
     return "\n\n".join(parts)
+
+
+# ─── QA 直检：原始 QA 对 + Level-1 Know-How 并行检索 ──────────────────────────
+
+class QADirectRetriever:
+    """对单个 QA knowledge 目录的原始 QA 对进行加载与检索。
+
+    从 knowledge_traceback.json 加载 Level-1 成功提炼的 QA 对，
+    支持 TF-IDF + Dense 混合检索，返回与用户问题最相关的原始 QA。
+    """
+
+    def __init__(
+        self,
+        knowledge_dir: str,
+        embedding_func: Callable = None,
+    ):
+        self.knowledge_dir = knowledge_dir
+        self.dir_name = os.path.basename(knowledge_dir)
+        self.qa_pairs: list[dict] = []
+
+        traceback_path = os.path.join(knowledge_dir, "knowledge_traceback.json")
+        if not os.path.exists(traceback_path):
+            return
+        try:
+            with open(traceback_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return
+
+        for _key, entry in data.items():
+            if entry.get("status") != "success":
+                continue
+            kh = entry.get("Know_How", "")
+            if not kh or not kh.strip():
+                continue
+            inp = entry.get("input", {})
+            q = inp.get("question", "")
+            a = inp.get("answer", "")
+            if not q:
+                continue
+            self.qa_pairs.append({
+                "index": entry.get("index", -1),
+                "question": q,
+                "answer": a,
+                "know_how": kh,
+                "extra_info": inp.get("Extra_Information", ""),
+            })
+
+        if not self.qa_pairs:
+            return
+
+        try:
+            self._tokenizer = _build_jieba_tokenizer()
+        except Exception:
+            self._tokenizer = _build_charwb_tokenizer()
+
+        self._qa_token_sets: list[set[str]] = []
+        for p in self.qa_pairs:
+            tokens = self._tokenizer(f"{p['question']} {p['answer']}")
+            self._qa_token_sets.append(set(tokens))
+
+        self._qa_embeddings: list[list[float]] | None = None
+        if embedding_func is not None and self.qa_pairs:
+            try:
+                texts = [f"{p['question']} {p['answer']}" for p in self.qa_pairs]
+                self._qa_embeddings = embedding_func(texts)
+            except Exception as e:
+                print(f"[QADirect] Dense embedding 预计算失败 ({self.dir_name}): {e}")
+
+    def search(
+        self,
+        question: str,
+        top_n: int = 3,
+        query_embedding: list[float] | None = None,
+    ) -> list[dict]:
+        """混合检索 top-N 最相关的原始 QA 对。"""
+        if not self.qa_pairs or top_n <= 0:
+            return []
+
+        q_tokens = set(self._tokenizer(question))
+
+        tfidf_scores = []
+        for ts in self._qa_token_sets:
+            if not ts or not q_tokens:
+                tfidf_scores.append(0.0)
+            else:
+                overlap = q_tokens & ts
+                tfidf_scores.append(
+                    len(overlap) / math.sqrt(len(q_tokens) * len(ts))
+                )
+
+        dense_scores = [0.0] * len(self.qa_pairs)
+        if query_embedding is not None and self._qa_embeddings is not None:
+            for i, emb in enumerate(self._qa_embeddings):
+                dense_scores[i] = _cosine_dense(query_embedding, emb)
+
+        combined = [
+            (i, tfidf_scores[i] + dense_scores[i])
+            for i in range(len(self.qa_pairs))
+        ]
+        combined.sort(key=lambda x: x[1], reverse=True)
+
+        results = []
+        for idx, score in combined[:top_n]:
+            p = self.qa_pairs[idx]
+            results.append({
+                "source_dir": self.dir_name,
+                "knowledge_dir": self.knowledge_dir,
+                "qa_index": p["index"],
+                "question": p["question"],
+                "answer": p["answer"],
+                "know_how": p["know_how"],
+                "extra_info": p["extra_info"],
+                "score": round(score, 6),
+            })
+        return results
+
+
+def retrieve_qa_direct_candidates(
+    question: str,
+    qa_retrievers: list[QADirectRetriever],
+    top_n: int = 3,
+    query_embedding: list[float] | None = None,
+) -> list[dict]:
+    """对多个 QA 目录执行 QA 直检，汇总去重后返回全局 top-N。"""
+    all_hits: list[dict] = []
+    for ret in qa_retrievers:
+        all_hits.extend(ret.search(question, top_n=top_n, query_embedding=query_embedding))
+
+    all_hits.sort(key=lambda x: x["score"], reverse=True)
+
+    seen: set[tuple] = set()
+    deduplicated = []
+    for h in all_hits:
+        uid = (h["source_dir"], h["qa_index"])
+        if uid in seen:
+            continue
+        seen.add(uid)
+        deduplicated.append(h)
+
+    return deduplicated[:top_n]
+
+
+def format_qa_direct_text(qa_hit: dict) -> str:
+    """将单条 QA 直检结果格式化为 LLM 可读的推理素材。"""
+    lines = []
+    lines.append(f"原始问题: {qa_hit['question']}")
+    lines.append(f"原始答案: {qa_hit['answer']}")
+    if qa_hit.get("extra_info"):
+        lines.append(f"补充信息: {qa_hit['extra_info']}")
+    lines.append(f"关联知识 (Level-1 Know-How): {qa_hit['know_how']}")
+    return "\n".join(lines)

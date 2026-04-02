@@ -12,7 +12,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_URL = "http://mlp.paas.dc.servyou-it.com/hw-embedding-bge/v1/embeddings"
+EMBEDDING_URL = "http://mlp.paas.dc.servyou-it.com/text-embedding-bge/v1/embeddings"
 EMBEDDING_MODEL = "bge-m3"
 
 
