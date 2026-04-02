@@ -11,10 +11,14 @@ MapReduce 推理模块（v2）
 import json
 import os
 import concurrent.futures
+import threading
 from typing import Callable
 from tqdm import tqdm
 
+import time
+
 from .retrieval import (
+    build_retrievers,
     retrieve_candidates,
     load_knowledge_content,
     load_edge_cases,
@@ -284,8 +288,11 @@ def run_mapreduce_inference(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
+    question_max_workers: int = 1,
     enable_edge_cases: bool = True,
     enable_qa_direct: bool = True,
+    pre_built_retrievers=None,
+    on_question_done: Callable = None,
 ) -> list[dict]:
     """
     完整 MapReduce 推理流水线（含 QA 直检并行路径）。
@@ -305,16 +312,30 @@ def run_mapreduce_inference(
     embedding_func           : Dense embedding 函数，可选
     tfidf_top_n              : 所有双路检索共享的 TF-IDF Top-N
     embedding_top_n          : 所有双路检索共享的 Dense Embedding Top-N
-    map_max_workers          : Map 阶段并发线程数
+    map_max_workers          : 单题内 Map/Phase3 并发线程数
+    question_max_workers     : 问题级别并发数（默认 1 即串行；>1 时多题同时处理，
+                               总并发 ≈ question_max_workers × map_max_workers）
     enable_edge_cases        : 是否启用 Phase 3 边缘案例兜底（默认开启）
     enable_qa_direct         : 是否启用 QA 直检并行路径（默认开启）
+    pre_built_retrievers     : 预构建的 KnowledgeRetriever 列表，避免每题重复加载索引
+    on_question_done         : 每道题完成后的回调 on_question_done(result)，用于增量保存
 
     Returns
     -------
     推理结果列表，每项包含问题、Map 详情、Reduce 最终答案等
     """
-    print(f"[Infer] 收到 {len(questions)} 个问题, "
-          f"{len(knowledge_dirs)} 个知识目录")
+    total_q = len(questions)
+    print(f"[Infer] 收到 {total_q} 个问题, {len(knowledge_dirs)} 个知识目录, "
+          f"问题级并发={question_max_workers}, Map并发={map_max_workers}")
+
+    # ── 预构建检索器（避免每道题重复加载索引 JSON）──
+    if pre_built_retrievers is not None:
+        retrievers = pre_built_retrievers
+        print(f"[Infer] 使用预构建检索器: {len(retrievers)} 个目录")
+    else:
+        print("[Infer] 首次构建检索器（建议外部预构建后传入以提速）...")
+        retrievers = build_retrievers(knowledge_dirs)
+        print(f"[Infer] 检索器构建完成: {len(retrievers)} 个目录")
 
     # ── 预加载 Level-1 Know-How 映射（用于 Phase 3 边缘案例兜底）──
     level1_maps: dict[str, dict[int, str]] = {}
@@ -354,20 +375,39 @@ def run_mapreduce_inference(
             print(f"[Infer] 已加载 QA 直检索引: {total_qa} 条原始 QA "
                   f"(来自 {len(qa_direct_retrievers)} 个目录)")
 
-    all_output = []
+    print("")
 
-    for q_item in tqdm(questions, desc="Questions"):
+    # ── 每道题的完整 4 阶段处理（封装成函数供并发调用）──
+    _q_counter_lock = threading.Lock()
+    _q_counter = [0]
+    _callback_lock = threading.Lock()
+    pbar = tqdm(total=total_q, desc="Questions")
+
+    def _process_one_question(q_item: dict) -> dict:
+        with _q_counter_lock:
+            _q_counter[0] += 1
+            q_num = _q_counter[0]
+
         q_idx = q_item["q_idx"]
         question = q_item["question"]
+        q_preview = question[:40].replace("\n", " ")
+
+        def _log(phase: str, msg: str):
+            print(f"  [Q{q_num}/{total_q}][{phase}] {msg}")
+
+        t_start = time.time()
+        print(f"\n{'─'*60}")
+        print(f"[Q{q_num}/{total_q}] idx={q_idx} | {q_preview}...")
 
         # ── Phase 1: 双路并行检索 ──────────────────────────────────────
         candidates = retrieve_candidates(
             question=question,
-            knowledge_dirs=knowledge_dirs,
             tfidf_top_n=tfidf_top_n,
             embedding_top_n=embedding_top_n,
             embedding_func=embedding_func,
+            pre_built_retrievers=retrievers,
         )
+        _log("Phase1", f"Level-2 候选知识块: {len(candidates)} 个")
 
         # ── Phase 1b: QA 直检并行检索 ─────────────────────────────────
         qa_direct_hits = []
@@ -384,10 +424,12 @@ def run_mapreduce_inference(
                 embedding_top_n=embedding_top_n,
                 query_embedding=query_emb,
             )
+        _log("Phase1", f"QA 直检命中: {len(qa_direct_hits)} 条")
 
         if not candidates and not qa_direct_hits:
-            all_output.append(_build_empty_result(q_idx, question))
-            continue
+            _log("Phase1", "无任何候选，跳过此题")
+            pbar.update(1)
+            return _build_empty_result(q_idx, question)
 
         # 加载知识块文本内容，构建 Map 任务
         map_tasks = []
@@ -420,16 +462,20 @@ def run_mapreduce_inference(
             })
 
         if not map_tasks and not qa_direct_tasks:
-            all_output.append(_build_empty_result(q_idx, question))
-            continue
+            _log("Phase1", "知识块内容为空，跳过此题")
+            pbar.update(1)
+            return _build_empty_result(q_idx, question)
 
         # ── Phase 2: 并行 Map 推理（Level-2 知识块 + QA 直检 + LLM 裸考 同时进行）──
+        bare_enabled = extra_llm_func is not None
+        total_map_tasks = len(map_tasks) + len(qa_direct_tasks) + (1 if bare_enabled else 0)
+        _log("Phase2", f"启动并行 Map: L2={len(map_tasks)}, QA直检={len(qa_direct_tasks)}, "
+             f"裸考={1 if bare_enabled else 0}，共 {total_map_tasks} 个任务，并发={map_max_workers}")
+
         map_results = []
         qa_direct_results = []
         llm_bare_result = None
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=map_max_workers,
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=map_max_workers) as executor:
             l2_futures = {
                 executor.submit(
                     _run_map_task, task, map_llm_func,
@@ -454,33 +500,39 @@ def run_mapreduce_inference(
                     ): ("bare", bare_task)
                 }
             all_futures = {**l2_futures, **qd_futures, **bare_futures}
+            done_count = 0
             for future in concurrent.futures.as_completed(all_futures):
                 tag, _task = all_futures[future]
                 try:
                     result = future.result()
+                    status = result.get("Match_Status", "?")
+                    done_count += 1
                     if tag == "l2":
                         map_results.append(result)
+                        _log("Phase2", f"  L2 [{done_count}/{total_map_tasks}] key={result.get('entry_key')} → {status}")
                     elif tag == "qd":
                         qa_direct_results.append(result)
+                        _log("Phase2", f"  QA直检 [{done_count}/{total_map_tasks}] qa_idx={result.get('qa_index')} → {status}")
                     else:
                         llm_bare_result = result
+                        _log("Phase2", f"  裸考 [{done_count}/{total_map_tasks}] → {status}")
                 except Exception as exc:
-                    print(f"[-] Map 异常 (q_idx={q_idx}, type={tag}): {exc}")
+                    done_count += 1
+                    print(f"  [-] Map 异常 (q_idx={q_idx}, type={tag}): {exc}")
 
-        valid_results = [
-            r for r in map_results if r.get("Match_Status") == "YES"
-        ]
-        rejected_results = [
-            r for r in map_results if r.get("Match_Status") != "YES"
-        ]
+        l2_valid = [r for r in map_results if r.get("Match_Status") == "YES"]
+        rejected_results = [r for r in map_results if r.get("Match_Status") != "YES"]
+        qa_direct_valid = [r for r in qa_direct_results if r.get("Match_Status") == "YES"]
+        bare_valid = llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES"
 
-        qa_direct_valid = [
-            r for r in qa_direct_results if r.get("Match_Status") == "YES"
-        ]
+        valid_results = list(l2_valid)
         valid_results.extend(qa_direct_valid)
-
-        if llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES":
+        if bare_valid:
             valid_results.append(llm_bare_result)
+
+        _log("Phase2", f"完成: L2 {len(l2_valid)}/{len(map_results)} 有效, "
+             f"QA直检 {len(qa_direct_valid)}/{len(qa_direct_results)} 有效, "
+             f"裸考 {'YES' if bare_valid else ('NO' if llm_bare_result else '未启用')}")
 
         # ── Phase 3: 边缘案例兜底（仅 QA Know-How）──────────────────
         edge_fallback_results = []
@@ -490,11 +542,10 @@ def run_mapreduce_inference(
                 if r.get("knowledge_type") == "qa_v2"
             ]
             if qa_rejected:
+                _log("Phase3", f"触发边缘案例兜底: {len(qa_rejected)} 个被拒绝的 QA 知识块")
                 edge_tasks = []
                 for r in qa_rejected:
-                    kd = _find_knowledge_dir(
-                        knowledge_dirs, r["source_dir"],
-                    )
+                    kd = _find_knowledge_dir(knowledge_dirs, r["source_dir"])
                     edge_tasks.append({
                         "q_idx": q_idx,
                         "question": question,
@@ -503,10 +554,7 @@ def run_mapreduce_inference(
                         "entry_key": r["entry_key"],
                         "level1_map": level1_maps.get(kd, {}),
                     })
-
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=map_max_workers,
-                ) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=map_max_workers) as executor:
                     futures = {
                         executor.submit(
                             _run_edge_case_fallback, task,
@@ -522,39 +570,44 @@ def run_mapreduce_inference(
                             edge_fallback_results.append(ec_result)
                             if ec_result.get("Match_Status") == "YES":
                                 valid_results.append(ec_result)
+                            _log("Phase3", f"  兜底 key={ec_result.get('entry_key')} → {ec_result.get('Match_Status')}")
                         except Exception as exc:
-                            print(f"[-] EdgeCase 异常 (q_idx={q_idx}): {exc}")
+                            print(f"  [-] EdgeCase 异常 (q_idx={q_idx}): {exc}")
+
+                edge_success = len([r for r in edge_fallback_results if r.get("Match_Status") == "YES"])
+                _log("Phase3", f"完成: {edge_success}/{len(edge_fallback_results)} 兜底成功")
+            else:
+                _log("Phase3", "无被拒绝的 QA 知识块，跳过兜底")
+        elif not enable_edge_cases:
+            _log("Phase3", "已禁用（--no-edge-cases）")
 
         # ── Phase 4: Reduce 融合 ───────────────────────────────────────
-        reduce_input = {
-            "q_idx": q_idx,
-            "question": question,
-            "valid_results": valid_results,
-        }
+        _log("Phase4", f"Reduce 融合: 汇总 {len(valid_results)} 个有效推理结果...")
         reduce_result = _run_reduce_task(
-            reduce_input, reduce_llm_func, summary_prompt_func,
+            {"q_idx": q_idx, "question": question, "valid_results": valid_results},
+            reduce_llm_func, summary_prompt_func,
         )
 
-        # 向后兼容：将 LLM 裸考的回答填入 extra_information 列
         llm_bare_answer = ""
-        if llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES":
+        if bare_valid:
             llm_bare_answer = llm_bare_result.get("Derived_Answer", "")
 
-        # ── 组装输出 ───────────────────────────────────────────────────
-        all_output.append({
+        final_ans = reduce_result.get("Final_Answer", "")
+        elapsed = time.time() - t_start
+        _log("Phase4", f"完成 | 耗时 {elapsed:.1f}s | 最终答案: {str(final_ans)[:60]}...")
+        pbar.update(1)
+
+        return {
             "q_idx": q_idx,
             "question": question,
             "retrieval_candidates_count": len(candidates),
             "map_total_evaluated": len(map_results),
-            "map_match_count": len([
-                r for r in map_results if r.get("Match_Status") == "YES"
-            ]),
+            "map_match_count": len(l2_valid),
             "qa_direct_count": len(qa_direct_results),
             "qa_direct_match_count": len(qa_direct_valid),
             "edge_fallback_count": len(edge_fallback_results),
             "edge_fallback_match_count": len([
-                r for r in edge_fallback_results
-                if r.get("Match_Status") == "YES"
+                r for r in edge_fallback_results if r.get("Match_Status") == "YES"
             ]),
             "total_valid_count": len(valid_results),
             "map_results": map_results,
@@ -563,15 +616,45 @@ def run_mapreduce_inference(
             "valid_results": valid_results,
             "rejected_reasons": [
                 f"KH[{r.get('kh_source_id')}]: {r.get('Rejection_Reason')}"
-                for r in map_results
-                if r.get("Match_Status") != "YES"
+                for r in map_results if r.get("Match_Status") != "YES"
             ],
             "extra_information": llm_bare_answer,
             "synthesis_analysis": reduce_result.get("Synthesis_Analysis", ""),
-            "final_answer": reduce_result.get("Final_Answer", ""),
-        })
+            "final_answer": final_ans,
+        }
 
-    print(f"\n[Infer] 推理完成！共处理 {len(all_output)} 个问题")
+    # ── 串行 or 问题级并发 ──────────────────────────────────────────────────
+    all_output = []
+
+    if question_max_workers <= 1:
+        for q_item in questions:
+            result = _process_one_question(q_item)
+            all_output.append(result)
+            with _callback_lock:
+                if on_question_done:
+                    on_question_done(result)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=question_max_workers) as executor:
+            futures = {
+                executor.submit(_process_one_question, q_item): q_item
+                for q_item in questions
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    all_output.append(result)
+                    with _callback_lock:
+                        if on_question_done:
+                            on_question_done(result)
+                except Exception as exc:
+                    q_item = futures[future]
+                    print(f"[-] 问题处理异常 (q_idx={q_item.get('q_idx')}): {exc}")
+
+    pbar.close()
+    all_output.sort(key=lambda x: x["q_idx"])
+
+    print(f"\n{'='*60}")
+    print(f"[Infer] 推理完成！共处理 {len(all_output)} 个问题")
     return all_output
 
 
@@ -693,6 +776,7 @@ def run_mapreduce_inference_file(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     map_max_workers: int = 4,
+    question_max_workers: int = 1,
     enable_edge_cases: bool = True,
     enable_qa_direct: bool = True,
     question_column: str = "question",
@@ -730,6 +814,8 @@ def run_mapreduce_inference_file(
     -------
     输出文件路径
     """
+    import pandas as pd
+
     df = _read_input_file(input_path)
     print(f"[Infer] 加载 {len(df)} 条数据 ({os.path.basename(input_path)})")
 
@@ -746,6 +832,30 @@ def run_mapreduce_inference_file(
             questions.append({"q_idx": index, "question": q})
 
     print(f"[Infer] 有效问题: {len(questions)} 条")
+
+    # ── 预构建检索器（所有问题共享，避免每题重复加载索引 JSON）──
+    print("[Infer] 预构建检索器...")
+    retrievers = build_retrievers(knowledge_dirs)
+    print(f"[Infer] 检索器就绪: {len(retrievers)} 个目录\n")
+
+    # ── 增量保存：每道题完成后立即写入检查点文件（线程安全）──
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    checkpoint_path = output_path + ".ckpt.csv"
+    collected_results: list[dict] = []
+    saved_count = 0
+    _ckpt_lock = threading.Lock()
+
+    def _on_question_done(result: dict):
+        nonlocal saved_count
+        with _ckpt_lock:
+            collected_results.append(result)
+            try:
+                partial_df = _append_results_to_df(df.copy(), collected_results)
+                partial_df.to_csv(checkpoint_path, index=False, encoding="utf-8-sig")
+                saved_count += 1
+                print(f"  [Checkpoint] 已保存 {saved_count}/{len(questions)} 题 → {os.path.basename(checkpoint_path)}")
+            except Exception as e:
+                print(f"  [Checkpoint] 保存失败: {e}")
 
     results = run_mapreduce_inference(
         knowledge_dirs=knowledge_dirs,
@@ -764,15 +874,25 @@ def run_mapreduce_inference_file(
         tfidf_top_n=tfidf_top_n,
         embedding_top_n=embedding_top_n,
         map_max_workers=map_max_workers,
+        question_max_workers=question_max_workers,
         enable_edge_cases=enable_edge_cases,
         enable_qa_direct=enable_qa_direct,
+        pre_built_retrievers=retrievers,
+        on_question_done=_on_question_done,
     )
 
     df = _append_results_to_df(df, results)
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     _write_output_file(df, output_path)
-    print(f"\n[Infer] 结果已保存至: {output_path}")
+    print(f"\n[Infer] 最终结果已保存至: {output_path}")
+
+    # 清理检查点文件
+    if os.path.exists(checkpoint_path):
+        try:
+            os.remove(checkpoint_path)
+            print(f"[Infer] 检查点文件已清理: {os.path.basename(checkpoint_path)}")
+        except Exception:
+            pass
+
     return output_path
 
 

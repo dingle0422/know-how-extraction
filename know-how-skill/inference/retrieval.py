@@ -221,12 +221,28 @@ class KnowledgeRetriever:
 
 # ─── Phase 1 入口：多目录双路并行检索 ─────────────────────────────────────────
 
+def build_retrievers(knowledge_dirs: list[str]) -> list["KnowledgeRetriever"]:
+    """预构建所有目录的检索器，供多问题循环时复用，避免每题重复加载索引 JSON。"""
+    retrievers = []
+    for d in knowledge_dirs:
+        index_path = os.path.join(d, "retrieval_index.json")
+        if not os.path.exists(index_path):
+            print(f"[Retrieval] 跳过目录（无检索索引）: {d}")
+            continue
+        try:
+            retrievers.append(KnowledgeRetriever(d))
+        except Exception as e:
+            print(f"[Retrieval] 加载索引失败 ({d}): {e}")
+    return retrievers
+
+
 def retrieve_candidates(
     question: str,
-    knowledge_dirs: list[str],
+    knowledge_dirs: list[str] = None,
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     embedding_func: Callable = None,
+    pre_built_retrievers: list["KnowledgeRetriever"] = None,
 ) -> list[dict]:
     """
     Phase 1: 对指定的 knowledge 目录列表执行双路并行检索。
@@ -238,26 +254,21 @@ def retrieve_candidates(
 
     Parameters
     ----------
-    question         : 用户问题
-    knowledge_dirs   : knowledge 子目录路径列表
-    tfidf_top_n      : TF-IDF 路线每目录返回数量
-    embedding_top_n  : Dense Embedding 路线每目录返回数量
-    embedding_func   : Dense embedding 函数，签名 (texts: list[str]) -> list[list[float]]
+    question              : 用户问题
+    knowledge_dirs        : knowledge 子目录路径列表（若已传 pre_built_retrievers 可为 None）
+    tfidf_top_n           : TF-IDF 路线每目录返回数量
+    embedding_top_n       : Dense Embedding 路线每目录返回数量
+    embedding_func        : Dense embedding 函数，签名 (texts: list[str]) -> list[list[float]]
+    pre_built_retrievers  : 预构建好的 KnowledgeRetriever 列表（传入后跳过索引加载，显著提速）
 
     Returns
     -------
     去重后的候选知识块列表，每项包含 source_dir, entry_key, knowledge_type, score 等信息
     """
-    retrievers = []
-    for d in knowledge_dirs:
-        index_path = os.path.join(d, "retrieval_index.json")
-        if not os.path.exists(index_path):
-            print(f"[Retrieval] 跳过目录（无检索索引）: {d}")
-            continue
-        try:
-            retrievers.append(KnowledgeRetriever(d))
-        except Exception as e:
-            print(f"[Retrieval] 加载索引失败 ({d}): {e}")
+    if pre_built_retrievers is not None:
+        retrievers = pre_built_retrievers
+    else:
+        retrievers = build_retrievers(knowledge_dirs or [])
 
     if not retrievers:
         print("[Retrieval] 无可用的检索索引")

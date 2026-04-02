@@ -1,2 +1,2 @@
 from .mapreduce_infer import run_mapreduce_inference, run_mapreduce_inference_file
-from .retrieval import retrieve_candidates, KnowledgeRetriever, QADirectRetriever
+from .retrieval import retrieve_candidates, build_retrievers, KnowledgeRetriever, QADirectRetriever

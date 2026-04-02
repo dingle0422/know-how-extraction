@@ -104,7 +104,12 @@ def main():
     )
     parser.add_argument(
         "--max-workers", type=int, default=4,
-        help="Map/Phase3 并发线程数（默认: 4）",
+        help="单题内 Map/Phase3 并发线程数（默认: 4）",
+    )
+    parser.add_argument(
+        "--question-workers", type=int, default=1,
+        help="问题级别并发数（默认: 1 即串行；设为 2~4 可同时处理多道题，"
+             "总并发 ≈ question-workers × max-workers，请根据 API 并发上限设置）",
     )
     parser.add_argument(
         "--no-edge-cases", action="store_true",
@@ -192,6 +197,7 @@ def main():
         tfidf_top_n=args.tfidf_top_n,
         embedding_top_n=args.embedding_top_n,
         map_max_workers=args.max_workers,
+        question_max_workers=args.question_workers,
         enable_edge_cases=enable_edge,
         enable_qa_direct=enable_qa_direct,
         question_column=args.question_column,
