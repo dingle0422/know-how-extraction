@@ -190,6 +190,7 @@ def _run_edge_case_fallback(
         tfidf_top_n=tfidf_top_n,
         embedding_top_n=embedding_top_n,
         embedding_func=embedding_func,
+        level1_map=level1_map,
     )
     if not edge_cases:
         return _empty

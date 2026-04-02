@@ -145,8 +145,10 @@ def _refine_single_cluster(
 
     _ci = centroid["index"]
     for _step in know_how.get("steps", []):
-        if "action" in _step:
-            _step["action"] = append_qa_footnote(_step["action"], _ci)
+        _oc = _step.get("outcome")
+        _step["outcome"] = append_qa_footnote(
+            "" if _oc is None else str(_oc), _ci
+        )
     for _exc in know_how.get("exceptions", []):
         if "then" in _exc:
             _exc["then"] = append_qa_footnote(_exc["then"], _ci)

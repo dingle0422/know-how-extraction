@@ -407,6 +407,7 @@ def retrieve_edge_cases(
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
     embedding_func: Callable = None,
+    level1_map: dict[int, str] | None = None,
 ) -> list[dict]:
     """对单个 cluster 的边缘案例执行双路独立检索，返回去重后的候选案例。
 
@@ -414,6 +415,8 @@ def retrieve_edge_cases(
       1. TF-IDF: jieba 分词后计算 token overlap cosine → 独立 Top-N
       2. Dense Embedding: 若提供 embedding_func，计算语义相似度 → 独立 Top-N
       3. 两路结果取并集，按索引去重（保留最高分）
+
+    两路检索统一使用 Q + A + Level-1 Know-How 作为文档侧文本。
     """
     if not edge_cases or (tfidf_top_n <= 0 and embedding_top_n <= 0):
         return []
@@ -423,13 +426,18 @@ def retrieve_edge_cases(
     q_token_set = set(q_tokens)
 
     tfidf_scored: list[tuple[int, float]] = []
-    ec_question_texts: list[str] = []
+    ec_retrieval_texts: list[str] = []
     for i, ec in enumerate(edge_cases):
         inp = ec.get("input", {})
         ec_q = inp.get("question", ec.get("question", ""))
         ec_a = inp.get("answer", ec.get("answer", ""))
-        ec_question_texts.append(ec_q)
-        ec_text = f"{ec_q} {ec_a}"
+        ec_kh = ""
+        if level1_map:
+            ec_idx = ec.get("index")
+            if ec_idx is not None and ec_idx in level1_map:
+                ec_kh = level1_map[ec_idx]
+        ec_text = f"{ec_q} {ec_a} {ec_kh}".strip()
+        ec_retrieval_texts.append(ec_text)
         ec_token_set = set(tokenizer(ec_text))
         if not ec_token_set or not q_token_set:
             score = 0.0
@@ -445,7 +453,7 @@ def retrieve_edge_cases(
     dense_top: list[tuple[int, float]] = []
     if embedding_top_n > 0 and embedding_func is not None:
         try:
-            all_texts = [question] + ec_question_texts
+            all_texts = [question] + ec_retrieval_texts
             embeddings = embedding_func(all_texts)
             q_emb = embeddings[0]
             dense_scored = []
@@ -550,13 +558,13 @@ class QADirectRetriever:
 
         self._qa_token_sets: list[set[str]] = []
         for p in self.qa_pairs:
-            tokens = self._tokenizer(f"{p['question']} {p['answer']}")
-            self._qa_token_sets.append(set(tokens))
+            retrieval_text = f"{p['question']} {p['answer']} {p['know_how']}"
+            self._qa_token_sets.append(set(self._tokenizer(retrieval_text)))
 
         self._qa_embeddings: list[list[float]] | None = None
         if embedding_func is not None and self.qa_pairs:
             try:
-                texts = [f"{p['question']} {p['answer']}" for p in self.qa_pairs]
+                texts = [f"{p['question']} {p['answer']} {p['know_how']}" for p in self.qa_pairs]
                 self._qa_embeddings = embedding_func(texts)
             except Exception as e:
                 print(f"[QADirect] Dense embedding 预计算失败 ({self.dir_name}): {e}")

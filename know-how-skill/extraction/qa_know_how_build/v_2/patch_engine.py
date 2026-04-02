@@ -12,23 +12,23 @@ _STEP_ID_RE = re.compile(r'^\d+(\.\d+)*$')
 _FOOTNOTE_RE = re.compile(r'\[(\d+(?:,\s*\d+)*)\]\s*$')
 
 
-def _extract_footnotes(action: str) -> list[int]:
-    """从 action 末尾的 [1,2,3] 角标中提取 QA 序号列表。"""
-    m = _FOOTNOTE_RE.search(action)
+def _extract_footnotes(text: str) -> list[int]:
+    """从字符串末尾的 [1,2,3] 角标中提取 QA 序号列表。"""
+    m = _FOOTNOTE_RE.search(text)
     if m:
         return [int(x.strip()) for x in m.group(1).split(",")]
     return []
 
 
-def _strip_footnotes(action: str) -> str:
-    """移除 action 末尾的角标标记，返回纯文本。"""
-    return _FOOTNOTE_RE.sub("", action).rstrip()
+def _strip_footnotes(text: str) -> str:
+    """移除字符串末尾的角标标记，返回纯文本。"""
+    return _FOOTNOTE_RE.sub("", text).rstrip()
 
 
-def append_qa_footnote(action: str, qa_index: int) -> str:
-    """在 action 末尾追加 QA 序号角标，保留已有序号并去重。"""
-    existing = _extract_footnotes(action)
-    base = _strip_footnotes(action)
+def append_qa_footnote(text: str, qa_index: int) -> str:
+    """在字符串末尾追加 QA 序号角标，保留已有序号并去重。"""
+    existing = _extract_footnotes(text)
+    base = _strip_footnotes(text)
     if qa_index not in existing:
         existing.append(qa_index)
     return f"{base}[{','.join(str(x) for x in existing)}]"
@@ -84,7 +84,7 @@ def _tag_affected_element(kh: dict, op: dict, qa_index: int):
     """在受 patch 影响的元素上追加 QA 溯源角标。"""
     op_type = op.get("op", "")
 
-    # ── Steps: 角标打在 action 字段 ──
+    # ── Steps: 角标打在 outcome 字段末尾 ──
     if op_type in ("add_step", "modify_step"):
         steps = kh.get("steps", [])
         if op_type == "modify_step":
@@ -92,8 +92,11 @@ def _tag_affected_element(kh: dict, op: dict, qa_index: int):
         else:
             target = str(op.get("new_step", {}).get("step", ""))
         idx = _find_step_idx(steps, target)
-        if idx >= 0 and "action" in steps[idx]:
-            steps[idx]["action"] = append_qa_footnote(steps[idx]["action"], qa_index)
+        if idx >= 0:
+            oc = steps[idx].get("outcome")
+            steps[idx]["outcome"] = append_qa_footnote(
+                "" if oc is None else str(oc), qa_index
+            )
 
     # ── Exceptions: 角标打在 then 字段 ──
     elif op_type == "add_exception":
@@ -177,11 +180,19 @@ def _op_modify_step(kh: dict, op: dict) -> str:
     if idx < 0:
         raise _PatchSkip(f"target step '{target}' 不存在")
 
+    footnotes_on_action_before = _extract_footnotes(
+        str(steps[idx].get("action", ""))
+    )
+
     changed_fields = []
     for field, value in updates.items():
         if field in ("step", "action", "condition", "outcome"):
             if field == "action":
-                old_footnotes = _extract_footnotes(steps[idx].get("action", ""))
+                value = _strip_footnotes(str(value))
+            elif field == "outcome":
+                old_footnotes = _extract_footnotes(
+                    str(steps[idx].get("outcome") or "")
+                )
                 new_base = _strip_footnotes(str(value))
                 if old_footnotes:
                     value = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
@@ -192,6 +203,22 @@ def _op_modify_step(kh: dict, op: dict) -> str:
 
     if not changed_fields:
         raise _PatchSkip("updates 中无合法字段")
+
+    if "action" in changed_fields and footnotes_on_action_before:
+        oc = str(steps[idx].get("outcome") or "")
+        for n in footnotes_on_action_before:
+            oc = append_qa_footnote(oc, n)
+        steps[idx]["outcome"] = oc
+
+    act = str(steps[idx].get("action", ""))
+    fa = _extract_footnotes(act)
+    if fa:
+        steps[idx]["action"] = _strip_footnotes(act)
+        oc = str(steps[idx].get("outcome") or "")
+        for n in fa:
+            oc = append_qa_footnote(oc, n)
+        steps[idx]["outcome"] = oc
+
     return f"修改 step {target}: {', '.join(changed_fields)}"
 
 
