@@ -76,6 +76,7 @@ def _run_map_task(
     result["entry_key"] = task_input["entry_key"]
     result["knowledge_type"] = task_input["knowledge_type"]
     result["kh_source_id"] = f"{task_input['source_dir']}:{task_input['entry_key']}"
+    result["kh_text"] = task_input["kh_text"]
     return result
 
 
@@ -110,6 +111,10 @@ def _run_qa_direct_map_task(
     result["knowledge_type"] = "qa_direct"
     result["kh_source_id"] = f"{task_input['source_dir']}:qa_{task_input['qa_index']}"
     result["is_qa_direct"] = True
+    result["qa_text"] = task_input["qa_text"]
+    result["qa_question"] = task_input.get("qa_question", "")
+    result["qa_answer"] = task_input.get("qa_answer", "")
+    result["qa_know_how"] = task_input.get("qa_know_how", "")
     return result
 
 
@@ -183,6 +188,9 @@ def _run_edge_case_fallback(
         "Reasoning_Chain": "",
         "Derived_Answer": "",
         "is_edge_case_fallback": True,
+        "ec_text": "",
+        "ec_knowhow_entry_key": entry_key,
+        "ec_matched_qa_indices": [],
     }
 
     all_edge_cases = load_edge_cases(knowledge_dir, entry_key)
@@ -198,6 +206,8 @@ def _run_edge_case_fallback(
     )
     if not edge_cases:
         return _empty
+
+    ec_matched_qa_indices = [ec.get("index") for ec in edge_cases if ec.get("index") is not None]
 
     ec_text = format_edge_cases_text(edge_cases, level1_map=level1_map)
 
@@ -219,6 +229,9 @@ def _run_edge_case_fallback(
     result["knowledge_type"] = "qa_v2"
     result["kh_source_id"] = f"{task_input['source_dir']}:{entry_key}:edge"
     result["is_edge_case_fallback"] = True
+    result["ec_text"] = ec_text
+    result["ec_knowhow_entry_key"] = entry_key
+    result["ec_matched_qa_indices"] = ec_matched_qa_indices
     return result
 
 
@@ -459,6 +472,9 @@ def run_mapreduce_inference(
                 "source_dir": hit["source_dir"],
                 "qa_index": hit["qa_index"],
                 "qa_text": format_qa_direct_text(hit),
+                "qa_question": hit["question"],
+                "qa_answer": hit["answer"],
+                "qa_know_how": hit["know_how"],
             })
 
         if not map_tasks and not qa_direct_tasks:
@@ -621,6 +637,9 @@ def run_mapreduce_inference(
             "extra_information": llm_bare_answer,
             "synthesis_analysis": reduce_result.get("Synthesis_Analysis", ""),
             "final_answer": final_ans,
+            "valid_kh_source_qa": _format_valid_kh_sources(l2_valid),
+            "valid_edge_source_qa": _format_valid_edge_sources(edge_fallback_results),
+            "valid_qa_direct_source_qa": _format_valid_qa_direct_sources(qa_direct_valid),
         }
 
     # ── 串行 or 问题级并发 ──────────────────────────────────────────────────
@@ -658,6 +677,55 @@ def run_mapreduce_inference(
     return all_output
 
 
+def _format_valid_kh_sources(l2_valid_results: list[dict]) -> str:
+    """将有效 L2 知识块的源 QA + Know-How 格式化为可读文本。"""
+    if not l2_valid_results:
+        return ""
+    parts = []
+    for i, r in enumerate(l2_valid_results, 1):
+        src = r.get("kh_source_id", "?")
+        kh = r.get("kh_text", "")
+        parts.append(f"=== 有效知识块 {i} [{src}] ===\n{kh}")
+    return "\n\n".join(parts)
+
+
+def _format_valid_edge_sources(edge_results: list[dict]) -> str:
+    """将有效边缘案例兜底的源 QA + Know-How 格式化为可读文本。"""
+    valid = [r for r in edge_results if r.get("Match_Status") == "YES"]
+    if not valid:
+        return ""
+    parts = []
+    for i, r in enumerate(valid, 1):
+        src = r.get("kh_source_id", "?")
+        kh_key = r.get("ec_knowhow_entry_key", "?")
+        qa_indices = r.get("ec_matched_qa_indices", [])
+        ec = r.get("ec_text", "")
+        header = f"=== 有效边缘案例 {i} [{src}] | Know-How序号={kh_key} | QA序号={qa_indices} ==="
+        parts.append(f"{header}\n{ec}")
+    return "\n\n".join(parts)
+
+
+def _format_valid_qa_direct_sources(qa_direct_valid_results: list[dict]) -> str:
+    """将 QA 直检有效命中的源 QA + Know-How 格式化为可读文本。"""
+    if not qa_direct_valid_results:
+        return ""
+    parts = []
+    for i, r in enumerate(qa_direct_valid_results, 1):
+        src = r.get("kh_source_id", "?")
+        q = r.get("qa_question", "")
+        a = r.get("qa_answer", "")
+        kh = r.get("qa_know_how", "")
+        lines = [f"=== QA直检 {i} [{src}] ==="]
+        if q:
+            lines.append(f"原始问题: {q}")
+        if a:
+            lines.append(f"原始答案: {a}")
+        if kh:
+            lines.append(f"关联知识 (Know-How): {kh}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def _build_empty_result(q_idx: int, question: str) -> dict:
     """构建未检索到候选知识块时的空结果。"""
     return {
@@ -679,6 +747,9 @@ def _build_empty_result(q_idx: int, question: str) -> dict:
         "extra_information": "",
         "synthesis_analysis": "未检索到相关候选知识块",
         "final_answer": "",
+        "valid_kh_source_qa": "",
+        "valid_edge_source_qa": "",
+        "valid_qa_direct_source_qa": "",
     }
 
 
@@ -730,6 +801,9 @@ def _append_results_to_df(df, results: list[dict]):
     df["Total_Valid_Count"] = 0
     df["Map_Valid_Details"] = ""
     df["Map_Rejected_Reasons"] = ""
+    df["Valid_KH_Source_QA"] = ""
+    df["Valid_Edge_Source_QA"] = ""
+    df["Valid_QADirect_Source_QA"] = ""
     df["Extra_Information"] = ""
     df["Reduce_Analysis"] = ""
     df["Final_Inference_Answer"] = ""
@@ -751,6 +825,9 @@ def _append_results_to_df(df, results: list[dict]):
             if r["valid_results"] else ""
         )
         df.at[index, "Map_Rejected_Reasons"] = "\n".join(r["rejected_reasons"])
+        df.at[index, "Valid_KH_Source_QA"] = r.get("valid_kh_source_qa", "")
+        df.at[index, "Valid_Edge_Source_QA"] = r.get("valid_edge_source_qa", "")
+        df.at[index, "Valid_QADirect_Source_QA"] = r.get("valid_qa_direct_source_qa", "")
         df.at[index, "Extra_Information"] = r["extra_information"]
         df.at[index, "Reduce_Analysis"] = r["synthesis_analysis"]
         df.at[index, "Final_Inference_Answer"] = r["final_answer"]

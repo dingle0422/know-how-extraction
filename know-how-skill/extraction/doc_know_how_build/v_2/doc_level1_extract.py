@@ -43,6 +43,9 @@ from doc_structure_parse import (
 )
 from prompts import safe_parse_json_with_llm_repair
 
+sys.path.insert(0, _EXTRACTION_DIR)
+from utils import sanitize_for_json
+
 file_lock = Lock()
 
 
@@ -56,7 +59,7 @@ def _update_json_file(file_path: str, key: str, value: dict):
             data_dict = {}
     data_dict[key] = value
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data_dict), f, ensure_ascii=False, indent=2)
 
 
 # ─── 文档解析 → 片段任务构建 ──────────────────────────────────────────────
@@ -151,7 +154,7 @@ def build_segment_tasks(
     if structure_file:
         os.makedirs(os.path.dirname(structure_file) or ".", exist_ok=True)
         with open(structure_file, "w", encoding="utf-8") as f:
-            json.dump(doc_structure, f, ensure_ascii=False, indent=2)
+            json.dump(sanitize_for_json(doc_structure), f, ensure_ascii=False, indent=2)
         print(f"  [DocStructure] 已保存: {structure_file}")
 
     tasks = _tasks_from_doc_structure(doc_structure)

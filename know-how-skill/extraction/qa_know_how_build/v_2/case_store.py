@@ -5,7 +5,15 @@
 
 import json
 import os
+import sys
 from threading import Lock
+
+_V_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_DIR = os.path.dirname(_V_DIR)
+_EXTRACTION_DIR = os.path.dirname(_PACKAGE_DIR)
+if _EXTRACTION_DIR not in sys.path:
+    sys.path.insert(0, _EXTRACTION_DIR)
+from utils import sanitize_for_json
 
 _store_lock = Lock()
 
@@ -23,7 +31,7 @@ def _load_json(path: str) -> dict:
 def _save_json(path: str, data: dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data), f, ensure_ascii=False, indent=2)
 
 
 # ─── 通用案例库 ──────────────────────────────────────────────────────────────

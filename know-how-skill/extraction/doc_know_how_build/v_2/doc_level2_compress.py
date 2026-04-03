@@ -41,7 +41,7 @@ sys.path.insert(0, _V_DIR)
 from doc_level1_extract import run_doc_level1_extraction, _SUPPORTED_DOC_EXTS
 from doc_structure_parse import parse_document
 from prompts import safe_parse_json_with_llm_repair
-from utils import get_source_stem, publish_to_knowledge, build_retrieval_index
+from utils import get_source_stem, publish_to_knowledge, build_retrieval_index, sanitize_for_json
 from clustering import make_clusters
 
 _compress_lock = Lock()
@@ -104,7 +104,7 @@ def _save_waste_backup(waste_items: list[dict], output_path: str,
     }
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data), f, ensure_ascii=False, indent=2)
     print(f"[废料备份库] 已写入 {len(waste_items)} 条: {output_path}")
 
 
@@ -120,7 +120,7 @@ def _update_json_file(file_path: str, key: str, value: dict):
             data_dict = {}
     data_dict[key] = value
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data_dict), f, ensure_ascii=False, indent=2)
 
 
 def _format_batch_snippets(batch: list[dict]) -> str:

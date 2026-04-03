@@ -54,6 +54,10 @@ except ImportError:
     from prompts import safe_parse_json_with_llm_repair
     from prompts_doc import doc_page_toc_summary_prompt, doc_toc_keywords_prompt
 
+if _EXTRACTION_DIR not in sys.path:
+    sys.path.insert(0, _EXTRACTION_DIR)
+from utils import sanitize_for_json
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  1. 多格式文档解析器
@@ -859,7 +863,7 @@ def run_doc_structure_parse(
     if output_file:
         os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(doc_structure, f, ensure_ascii=False, indent=2)
+            json.dump(sanitize_for_json(doc_structure), f, ensure_ascii=False, indent=2)
         print(f"[Layer-0] 结构化结果已保存: {output_file}")
 
     _print_summary(doc_structure)

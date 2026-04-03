@@ -25,6 +25,7 @@ from prompts import safe_parse_json_with_llm_repair
 from prompts_v2 import structured_kh_generate, kh_inference_validate, kh_minimal_update, kh_normalize_steps
 from patch_engine import apply_patch, append_qa_footnote
 from case_store import append_edge_cases
+from utils import sanitize_for_json
 
 _file_lock = Lock()
 
@@ -39,7 +40,7 @@ def _update_json_file(file_path: str, key: str, value: dict):
             data_dict = {}
     data_dict[key] = value
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data_dict), f, ensure_ascii=False, indent=2)
 
 
 # ─── Level 1 结果加载（V2 版：保留完整 input 数据）──────────────────────────

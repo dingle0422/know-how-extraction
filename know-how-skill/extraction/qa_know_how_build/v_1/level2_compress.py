@@ -23,6 +23,9 @@ except ImportError:
     sys.path.insert(0, _SKILL_ROOT)
     from prompts import safe_parse_json_with_llm_repair
 
+sys.path.insert(0, _EXTRACTION_DIR)
+from utils import sanitize_for_json
+
 try:
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -91,7 +94,7 @@ def _update_json_file(file_path: str, key: str, value: dict):
             data_dict = {}
     data_dict[key] = value
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(data_dict), f, ensure_ascii=False, indent=2)
 
 
 def load_level1_results(level1_file: str) -> list[dict]:

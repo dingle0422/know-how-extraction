@@ -5,9 +5,29 @@ Extraction 公共工具
 """
 
 import json
+import math
 import os
 import shutil
 from datetime import datetime
+
+
+def sanitize_for_json(obj):
+    """递归清理数据结构中的 None / NaN / Infinity，统一替换为空字符串。
+
+    确保 json.dump 输出的 JSON 不含 null、NaN、Infinity 等
+    可能导致某些解析器（如 Excel）无法打开的值。
+    """
+    if obj is None:
+        return ""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return ""
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    return obj
 
 
 def get_source_stem(filepath: str) -> str:
@@ -430,7 +450,7 @@ def build_retrieval_index(
 
     index_path = os.path.join(knowledge_dir, "retrieval_index.json")
     with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
+        json.dump(sanitize_for_json(index), f, ensure_ascii=False, indent=2)
 
     size_kb = os.path.getsize(index_path) / 1024
     print(f"[RetrievalIndex] 索引已保存: {index_path} ({size_kb:.1f} KB)")
