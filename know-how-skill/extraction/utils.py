@@ -103,6 +103,10 @@ def _render_structured_kh(kh: dict) -> str:
             if s.get("condition"):
                 condition_prefix = f"【触发条件：{s['condition']}】 → "
             line = f"{indent}{step_id}. {condition_prefix}{s.get('action', '')}"
+            if s.get("constraint"):
+                line += f" 【约束: {s['constraint']}】"
+            if s.get("policy_basis"):
+                line += f" 【依据: {s['policy_basis']}】"
             if s.get("outcome"):
                 line += f" → {s['outcome']}"
             lines.append(line)
@@ -113,13 +117,6 @@ def _render_structured_kh(kh: dict) -> str:
         lines.append("**例外情况**:")
         for ex in exceptions:
             lines.append(f"  - 当 {ex.get('when', '?')} → {ex.get('then', '?')}")
-        lines.append("")
-
-    constraints = kh.get("constraints", [])
-    if constraints:
-        lines.append("**约束/依据**:")
-        for c in constraints:
-            lines.append(f"  - {c}")
         lines.append("")
 
     return "\n".join(lines)
@@ -168,6 +165,12 @@ def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
             title = entry["know_how"].get("title", "未命名")
             if rendered.strip():
                 kh_blocks.append((title, rendered))
+            for ekh in entry.get("edge_know_hows", []):
+                if isinstance(ekh, dict):
+                    e_rendered = _render_structured_kh(ekh)
+                    e_title = ekh.get("title", "未命名")
+                    if e_rendered.strip():
+                        kh_blocks.append((e_title, e_rendered))
 
         elif "Final_Know_How" in entry:
             fkh = entry["Final_Know_How"]
@@ -227,18 +230,195 @@ def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
     )
 
 
+# ─── 检索关键词生成 ────────────────────────────────────────────────────────
+
+_RETRIEVAL_KEYWORDS_PROMPT = """\
+你是一个信息检索专家。下面是一条知识块的内容，请提取能帮助用户通过搜索找到它的关键词列表。
+
+# 知识块内容
+{content}
+
+# 提取要求
+提取 10-20 个关键词/短语，重点覆盖：
+1. **领域实体**：涉及的专业术语、政策名称、业务对象（如"进项发票""增值税""认证期限"）
+2. **场景动作**：描述该场景的动词或短语（如"逾期处理""补开发票""税前扣除"）
+3. **用户表达**：用户提问时可能使用的口语化说法和同义词（如"过期了怎么办""没有发票""扣税"）
+
+关键词应尽量短（2-6 字），避免与知识块标题和适用场景高度重复。
+
+# 输出格式
+直接输出 JSON 数组（不要用 ```json 包裹）：
+["关键词1", "关键词2", ...]"""
+
+
+def _render_entry_for_keywords(entry: dict) -> str:
+    """将知识条目渲染为供关键词提取 LLM 阅读的可读文本。"""
+    if "know_how" in entry and isinstance(entry["know_how"], dict):
+        kh = entry["know_how"]
+        parts = []
+        if kh.get("title"):
+            parts.append(f"标题: {kh['title']}")
+        if kh.get("scope"):
+            parts.append(f"适用场景: {kh['scope']}")
+        for s in kh.get("steps", []):
+            line = f"步骤: {s.get('action', '')}"
+            if s.get("condition"):
+                line = f"[当 {s['condition']}] {line}"
+            if s.get("constraint"):
+                line += f" [约束: {s['constraint']}]"
+            if s.get("policy_basis"):
+                line += f" [依据: {s['policy_basis']}]"
+            if s.get("outcome"):
+                line += f" → {s['outcome']}"
+            parts.append(line)
+        for ex in kh.get("exceptions", []):
+            parts.append(f"例外: 当 {ex.get('when', '?')} → {ex.get('then', '?')}")
+        return "\n".join(parts)
+
+    if "Final_Know_How" in entry:
+        fkh = entry["Final_Know_How"]
+        if isinstance(fkh, str):
+            return fkh[:3000]
+        if isinstance(fkh, list):
+            text = "\n".join(t.strip() for t in fkh if t.strip())
+            return text[:3000]
+
+    return ""
+
+
+def _generate_retrieval_keywords(
+    entry: dict,
+    llm_func,
+    existing_keywords: list[str] | None = None,
+) -> list[str]:
+    """为单条知识条目生成面向检索的关键词列表。
+
+    使用 LLM 从知识内容中提取领域实体、场景动作和用户常用表达，
+    失败时退回 existing_keywords（聚类阶段的 TF-IDF 关键词）。
+    """
+    content = _render_entry_for_keywords(entry)
+    if not content.strip():
+        return existing_keywords or []
+
+    try:
+        prompt = _RETRIEVAL_KEYWORDS_PROMPT.format(content=content)
+        raw = llm_func(prompt)["content"]
+        raw = raw.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        elif raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        keywords = json.loads(raw)
+        if isinstance(keywords, list):
+            cleaned = [str(kw).strip() for kw in keywords if str(kw).strip()]
+            if cleaned:
+                return cleaned
+    except Exception as e:
+        print(f"    [Keywords] LLM 提取失败，使用已有关键词: {e}")
+
+    return existing_keywords or []
+
+
+def _generate_all_retrieval_keywords(
+    data: dict,
+    entry_keys: list[str],
+    llm_func,
+    max_workers: int = 4,
+) -> dict[str, list[str]]:
+    """批量为多条知识块并行生成检索关键词。
+
+    已有 retrieval_keywords 的条目会跳过生成，直接复用。
+    返回 {entry_key: [keyword, ...]} 映射。
+    """
+    import concurrent.futures
+
+    to_generate = []
+    results: dict[str, list[str]] = {}
+    for key in entry_keys:
+        entry = data[key]
+        if entry.get("retrieval_keywords"):
+            results[key] = entry["retrieval_keywords"]
+        else:
+            to_generate.append(key)
+
+    if not to_generate:
+        print(f"[RetrievalIndex] 所有 {len(entry_keys)} 条知识块已有检索关键词，跳过生成")
+        return results
+
+    reused = len(entry_keys) - len(to_generate)
+    if reused:
+        print(f"[RetrievalIndex] 复用已有关键词 {reused} 条，"
+              f"新生成 {len(to_generate)} 条（并发={max_workers}）...")
+    else:
+        print(f"[RetrievalIndex] 正在为 {len(to_generate)} 条知识块"
+              f"生成检索关键词（并发={max_workers}）...")
+
+    counter = [0]
+    total = len(to_generate)
+
+    def _process_one(key: str) -> tuple[str, list[str]]:
+        entry = data[key]
+        existing = entry.get("cluster_keywords", entry.get("batch_keywords", []))
+        return key, _generate_retrieval_keywords(entry, llm_func, existing)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_process_one, key): key
+            for key in to_generate
+        }
+        for future in concurrent.futures.as_completed(futures):
+            key = futures[future]
+            try:
+                k, kws = future.result()
+                results[k] = kws
+                counter[0] += 1
+                if counter[0] % 5 == 0 or counter[0] == total:
+                    print(f"    [{counter[0]}/{total}] 关键词已生成")
+            except Exception as e:
+                fallback = data[key].get(
+                    "cluster_keywords", data[key].get("batch_keywords", []),
+                )
+                results[key] = fallback
+                counter[0] += 1
+                print(f"    [{counter[0]}/{total}] key={key} 失败: {e}")
+
+    print(f"[RetrievalIndex] 检索关键词生成完成")
+    return results
+
+
 # ─── 检索索引构建 ────────────────────────────────────────────────────────────
 
-def _extract_retrieval_text(entry: dict) -> str:
+def _extract_retrieval_text(
+    entry: dict,
+    retrieval_keywords: list[str] | None = None,
+) -> str:
     """从 knowledge.json 的单条记录中提取用于检索向量化的文本。
 
-    自动适配两种知识格式：
-      - QA v2 结构化: know_how dict → 拼接 title/scope/steps/exceptions/constraints
-      - Doc compression: Final_Know_How list[str] → 拼接所有主题文本
+    检索文本策略:
+      - 有 retrieval_keywords: title + scope + 关键词（语义集中，检索效果好）
+      - 无 retrieval_keywords: 全字段拼接（向后兼容）
+
+    自动适配两种知识格式:
+      - QA v2 结构化: know_how dict
+      - Doc compression: Final_Know_How list[str]
     """
     # QA v2 结构化格式
     if "know_how" in entry and isinstance(entry["know_how"], dict):
         kh = entry["know_how"]
+
+        if retrieval_keywords:
+            parts = []
+            if kh.get("title"):
+                parts.append(kh["title"])
+            if kh.get("scope"):
+                parts.append(kh["scope"])
+            parts.append(" ".join(retrieval_keywords))
+            return " ".join(parts)
+
         parts = []
         if kh.get("title"):
             parts.append(kh["title"])
@@ -249,6 +429,10 @@ def _extract_retrieval_text(entry: dict) -> str:
                 parts.append(s["action"])
             if s.get("condition"):
                 parts.append(s["condition"])
+            if s.get("constraint"):
+                parts.append(s["constraint"])
+            if s.get("policy_basis"):
+                parts.append(s["policy_basis"])
             if s.get("outcome"):
                 parts.append(s["outcome"])
         for ex in kh.get("exceptions", []):
@@ -256,13 +440,24 @@ def _extract_retrieval_text(entry: dict) -> str:
                 parts.append(ex["when"])
             if ex.get("then"):
                 parts.append(ex["then"])
-        for c in kh.get("constraints", []):
-            if isinstance(c, str):
-                parts.append(c)
         return " ".join(parts)
 
     # Doc compression 格式
     if "Final_Know_How" in entry:
+        if retrieval_keywords:
+            summary = entry.get("Synthesis_Summary", "")
+            if not summary:
+                fkh = entry["Final_Know_How"]
+                if isinstance(fkh, str):
+                    summary = fkh.strip().split("\n")[0][:200]
+                elif isinstance(fkh, list) and fkh:
+                    summary = fkh[0].strip().split("\n")[0][:200]
+            parts = []
+            if summary:
+                parts.append(summary)
+            parts.append(" ".join(retrieval_keywords))
+            return " ".join(parts)
+
         fkh = entry["Final_Know_How"]
         if isinstance(fkh, str):
             fkh = [fkh]
@@ -287,14 +482,16 @@ def build_retrieval_index(
     knowledge_json_path: str,
     knowledge_dir: str,
     embedding_func=None,
+    llm_func=None,
 ) -> str | None:
     """
     为 knowledge 目录构建检索索引文件 retrieval_index.json。
 
     对 knowledge.json 中每个成功的知识条目：
-      1. 提取检索用文本
-      2. 构建 TF-IDF 向量（保存 vocabulary + IDF 权重 + 条目向量）
-      3. 调用 embedding 服务构建 Dense 向量（可选，服务不可用时跳过）
+      1. 生成检索关键词（可选，需要 llm_func）
+      2. 提取检索用文本（有关键词时使用 title+scope+keywords 策略）
+      3. 构建 TF-IDF 向量（保存 vocabulary + IDF 权重 + 条目向量）
+      4. 调用 embedding 服务构建 Dense 向量（可选，服务不可用时跳过）
 
     Parameters
     ----------
@@ -302,6 +499,8 @@ def build_retrieval_index(
     knowledge_dir       : knowledge 子目录路径（索引文件保存位置）
     embedding_func      : Dense embedding 函数，签名 (texts: list[str]) -> list[list[float]]；
                           为 None 或调用失败时仅保存 TF-IDF 索引
+    llm_func            : LLM 调用函数，签名 (prompt: str) -> {"content": str}；
+                          用于生成检索关键词。为 None 时复用已有关键词或退回全字段拼接
 
     Returns
     -------
@@ -322,16 +521,52 @@ def build_retrieval_index(
         print("[RetrievalIndex] 无法识别 knowledge.json 格式，跳过索引构建")
         return None
 
-    # ── 提取检索文本 ──────────────────────────────────────────────────────
+    # ── 第 1 步：收集有效条目 ─────────────────────────────────────────────
+    valid_keys = []
+    for key in sorted(data.keys(), key=lambda x: int(x) if x.isdigit() else x):
+        entry = data[key]
+        if isinstance(entry, dict) and entry.get("status") == "success":
+            valid_keys.append(key)
+
+    if not valid_keys:
+        print("[RetrievalIndex] 无有效知识条目，跳过索引构建")
+        return None
+
+    print(f"[RetrievalIndex] 检测到 {knowledge_type} 格式，"
+          f"共 {len(valid_keys)} 条有效知识条目")
+
+    # ── 第 2 步：生成检索关键词 ───────────────────────────────────────────
+    entry_keywords: dict[str, list[str]] = {}
+    if llm_func is not None:
+        entry_keywords = _generate_all_retrieval_keywords(
+            data, valid_keys, llm_func,
+        )
+        keywords_updated = False
+        for key, kws in entry_keywords.items():
+            if kws and data[key].get("retrieval_keywords") != kws:
+                data[key]["retrieval_keywords"] = kws
+                keywords_updated = True
+        if keywords_updated:
+            with open(knowledge_json_path, "w", encoding="utf-8") as f:
+                json.dump(sanitize_for_json(data), f, ensure_ascii=False, indent=2)
+            print(f"[RetrievalIndex] 检索关键词已写回 knowledge.json")
+    else:
+        for key in valid_keys:
+            saved_kw = data[key].get("retrieval_keywords")
+            if saved_kw:
+                entry_keywords[key] = saved_kw
+        if entry_keywords:
+            print(f"[RetrievalIndex] 复用已有检索关键词: {len(entry_keywords)} 条")
+
+    # ── 第 3 步：提取检索文本 ─────────────────────────────────────────────
     entry_keys = []
     retrieval_texts = []
     entry_meta = {}
 
-    for key in sorted(data.keys(), key=lambda x: int(x) if x.isdigit() else x):
+    for key in valid_keys:
         entry = data[key]
-        if not isinstance(entry, dict) or entry.get("status") != "success":
-            continue
-        text = _extract_retrieval_text(entry)
+        kw = entry_keywords.get(key)
+        text = _extract_retrieval_text(entry, retrieval_keywords=kw)
         if not text.strip():
             continue
 
@@ -344,14 +579,17 @@ def build_retrieval_index(
             meta["title"] = kh.get("title", "")
             meta["scope"] = kh.get("scope", "")
         meta["keywords"] = entry.get("cluster_keywords", entry.get("batch_keywords", []))
+        meta["retrieval_keywords"] = kw or []
         entry_meta[key] = meta
 
     if not retrieval_texts:
         print("[RetrievalIndex] 无有效知识条目，跳过索引构建")
         return None
 
-    print(f"[RetrievalIndex] 检测到 {knowledge_type} 格式，"
-          f"共 {len(retrieval_texts)} 条有效知识条目")
+    kw_count = sum(1 for k in entry_keys if entry_keywords.get(k))
+    strategy = (f"title+scope+keywords ({kw_count}/{len(entry_keys)} 条)"
+                if kw_count else "全字段拼接（兼容模式）")
+    print(f"[RetrievalIndex] 检索文本策略: {strategy}")
 
     # ── TF-IDF 向量化 ────────────────────────────────────────────────────
     try:
@@ -437,8 +675,9 @@ def build_retrieval_index(
 
     # ── 组装并写入索引 ────────────────────────────────────────────────────
     index = {
-        "version": "1.0",
+        "version": "1.1",
         "knowledge_type": knowledge_type,
+        "retrieval_strategy": "title+scope+keywords" if kw_count else "full_fields",
         "created_at": datetime.now().isoformat(),
         "entry_count": len(entry_keys),
         "entry_keys": entry_keys,

@@ -446,6 +446,7 @@ def run_full_pipeline_for_doc(
             knowledge_json_path=_knowledge_json,
             knowledge_dir=knowledge_sub,
             embedding_func=_emb_func,
+            llm_func=llm_func,
         )
 
     # 复制废料备份到 knowledge 目录

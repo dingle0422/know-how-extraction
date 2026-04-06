@@ -69,7 +69,7 @@ def qwen(prompt: str, web_search: bool = False, enable_thinking: bool = False) -
 #"sk-5a5c8fea7cc14d779a201d8ab0be8f91"
 
 @retry(max_retries=3, sleep_seconds=5.0)
-def chat(messages: str, vendor: str = "volc", model: str = "deepseek-v3.2") -> str:
+def chat(messages: str, vendor: str = "aliyun", model: str = "deepseek-v3.2") -> str:
     if vendor == "servyou":
         URL = f"http://10.199.0.7:5000/api/llm/{vendor}/v1/chat/completions"
         app_id = "sk-d75b519b704d4d348245efe435f08ff3"
@@ -86,7 +86,7 @@ def chat(messages: str, vendor: str = "volc", model: str = "deepseek-v3.2") -> s
         "stream": False,
         "top_p": 0.7,
         "temperature": 0.5,
-        # "enable_thinking": True,
+        "enable_thinking": True,
         # "enable_search":True
     }
     response = requests.post(URL, data=json.dumps(PAYLOAD), headers=HEADERS).json()

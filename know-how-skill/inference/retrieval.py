@@ -8,10 +8,13 @@ Phase 1: 双路并行检索模块
 import json
 import math
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 import numpy as np
+
+_FOOTNOTE_RE = re.compile(r'\[(\d+(?:,\s*\d+)*)\]\s*$')
 
 
 # ─── 内部工具 ──────────────────────────────────────────────────────────────────
@@ -346,8 +349,13 @@ def load_knowledge_content(knowledge_dir: str, entry_key: str) -> str:
     return ""
 
 
+def _strip_footnotes(text: str) -> str:
+    """移除字符串末尾的 QA 溯源角标（如 [1,2,3]），避免推理时干扰大模型。"""
+    return _FOOTNOTE_RE.sub("", text).rstrip()
+
+
 def _render_qa_knowhow(kh: dict) -> str:
-    """将 QA v2 结构化 Know-How 渲染为可读文本。"""
+    """将 QA v2 结构化 Know-How 渲染为可读文本（剥离溯源角标）。"""
     parts = []
     if kh.get("title"):
         parts.append(f"【{kh['title']}】")
@@ -358,22 +366,23 @@ def _render_qa_knowhow(kh: dict) -> str:
         line = f"步骤{s.get('step', '?')}: {s.get('action', '')}"
         if s.get("condition"):
             line = f"[当 {s['condition']}] " + line
+        if s.get("constraint"):
+            line += f" 【约束: {s['constraint']}】"
+        if s.get("policy_basis"):
+            line += f" 【依据: {s['policy_basis']}】"
         if s.get("outcome"):
-            line += f" → {s['outcome']}"
+            line += f" → {_strip_footnotes(str(s['outcome']))}"
         parts.append(line)
 
     for ex in kh.get("exceptions", []):
-        parts.append(f"例外: 当 {ex.get('when', '?')} → {ex.get('then', '?')}")
-
-    for c in kh.get("constraints", []):
-        if isinstance(c, str):
-            parts.append(f"约束: {c}")
+        then = _strip_footnotes(str(ex.get('then', '?')))
+        parts.append(f"例外: 当 {ex.get('when', '?')} → {then}")
 
     return "\n".join(parts)
 
 
 def load_edge_cases(knowledge_dir: str, entry_key: str) -> list[dict]:
-    """从 edge_cases.json 中加载指定 cluster 的边缘案例。
+    """从 edge_cases.json 中加载指定 cluster 的边缘案例（原始 QA 元数据）。
 
     entry_key (如 "3") 映射到 edge_cases.json 中的 "cluster_3"。
     """
@@ -387,6 +396,31 @@ def load_edge_cases(knowledge_dir: str, entry_key: str) -> list[dict]:
     cluster_key = f"cluster_{entry_key}"
     cluster_data = data.get(cluster_key, {})
     return cluster_data.get("edge_cases", [])
+
+
+def load_edge_know_hows(knowledge_dir: str, entry_key: str) -> list[dict]:
+    """从 knowledge.json 中加载指定 cluster 的 edge_know_hows（结构化 KH 列表）。
+
+    这些 KH 由边缘案例递归聚类生成，与主 KH 平级，
+    可直接用于推理（与 Phase 2 相同的推理逻辑）。
+    """
+    kj_path = os.path.join(knowledge_dir, "knowledge.json")
+    if not os.path.exists(kj_path):
+        return []
+    try:
+        with open(kj_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+    entry = data.get(entry_key, {})
+    edge_khs = entry.get("edge_know_hows", [])
+    return [kh for kh in edge_khs if isinstance(kh, dict) and kh.get("steps")]
+
+
+def render_edge_know_how(kh: dict) -> str:
+    """将单个边缘 KH 渲染为推理可用的文本（复用 _render_qa_knowhow）。"""
+    return _render_qa_knowhow(kh)
 
 
 def load_level1_knowhow_map(knowledge_dir: str) -> dict[int, str]:
@@ -409,6 +443,31 @@ def load_level1_knowhow_map(knowledge_dir: str) -> dict[int, str]:
         kh = entry.get("Know_How", "")
         if kh and idx >= 0:
             mapping[idx] = kh
+    return mapping
+
+
+def build_qa_to_cluster_map(knowledge_dir: str) -> dict[int, str]:
+    """从 knowledge.json 构建 QA index → Level-2 entry_key 的反向映射。
+
+    遍历每个 cluster 的 absorbed_indices 和 edge_case_indices，
+    建立原始 QA 序号到其所属 Level-2 知识块 entry_key 的映射关系。
+    """
+    kj_path = os.path.join(knowledge_dir, "knowledge.json")
+    if not os.path.exists(kj_path):
+        return {}
+    try:
+        with open(kj_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+    mapping: dict[int, str] = {}
+    for entry_key, entry in data.items():
+        for idx in entry.get("absorbed_indices", []):
+            mapping[idx] = entry_key
+        for idx in entry.get("edge_case_indices", []):
+            if idx not in mapping:
+                mapping[idx] = entry_key
     return mapping
 
 

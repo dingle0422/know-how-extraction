@@ -107,6 +107,252 @@ def _llm_call_with_retry(llm_func, prompt: str, parse_json: bool = True,
 
 # ─── 单簇增量精炼 ──────────────────────────────────────────────────────────
 
+_MAX_EDGE_RECURSE_DEPTH = 5
+
+
+def _generate_single_edge_kh(sample: dict, llm_func, max_retries: int) -> dict:
+    """为单个 irrelevant 样本独立生成一个新的结构化 Know-How（仅当子簇仅 1 个样本时使用）。"""
+    s_inp = sample.get("input", {})
+    prompt = structured_kh_generate(
+        know_how_text=sample.get("Know_How", ""),
+        question=s_inp.get("question", ""),
+        answer=s_inp.get("answer", ""),
+        extra_info=s_inp.get("Extra_Information", ""),
+        reasoning=s_inp.get("reasoning", ""),
+    )
+    edge_kh = _llm_call_with_retry(llm_func, prompt, parse_json=True,
+                                    max_retries=max_retries)
+    ci = sample["index"]
+    for _step in edge_kh.get("steps", []):
+        _oc = _step.get("outcome")
+        _step["outcome"] = append_qa_footnote(
+            "" if _oc is None else str(_oc), ci
+        )
+    for _exc in edge_kh.get("exceptions", []):
+        if "then" in _exc:
+            _exc["then"] = append_qa_footnote(_exc["then"], ci)
+    edge_kh["source_qa_ids"] = [ci]
+    edge_kh["edge_qa_ids"] = []
+    return edge_kh
+
+
+def _refine_edge_samples(
+    edge_samples: list[dict],
+    llm_func,
+    max_retries_per_step: int,
+    cluster_key: str,
+    depth: int = 1,
+    embedding_func=None,
+    cosine_threshold: float = 0.75,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
+) -> list[dict]:
+    """
+    对边缘样本进行递归聚类 → 质心生成 → 验证/patch，返回所有平级的 know-how 列表。
+
+    与主流程共用同一套逻辑：
+    1. edge_samples 聚类（复用 make_clusters）
+    2. 每个子簇走 _refine_sub_cluster 逻辑（质心 → 验证 → patch）
+    3. 子簇内新产生的 irrelevant 样本递归处理（depth+1）
+    4. 递归深度达到 _MAX_EDGE_RECURSE_DEPTH 时，剩余 edge 各自独立生成 KH
+    """
+    from clustering import make_clusters
+
+    tag = f"{cluster_key}/edge-L{depth}"
+    if len(edge_samples) == 0:
+        return []
+
+    if len(edge_samples) == 1:
+        print(f"    [{tag}] 仅 1 个边缘样本，直接生成独立 KH")
+        return [_generate_single_edge_kh(edge_samples[0], llm_func, max_retries_per_step)]
+
+    if depth > _MAX_EDGE_RECURSE_DEPTH:
+        print(f"    [{tag}] 达到最大递归深度 {_MAX_EDGE_RECURSE_DEPTH}，"
+              f"{len(edge_samples)} 个边缘样本各自独立生成 KH")
+        return [_generate_single_edge_kh(s, llm_func, max_retries_per_step)
+                for s in edge_samples]
+
+    print(f"    [{tag}] {len(edge_samples)} 个边缘样本，开始二次聚类...")
+    sub_clusters = make_clusters(
+        edge_samples,
+        cosine_threshold=cosine_threshold,
+        embedding_func=embedding_func,
+        tfidf_weight=tfidf_weight,
+        embedding_weight=embedding_weight,
+    )
+    print(f"    [{tag}] 二次聚类完成: {len(sub_clusters)} 个子簇")
+
+    all_khs: list[dict] = []
+
+    for sc_idx, sc in enumerate(sub_clusters):
+        sc_tag = f"{tag}/sub{sc_idx}"
+        sc_centroid = sc["centroid_item"]
+        sc_others = sc["sorted_others"]
+
+        kh, sub_edge_samples, sub_log = _refine_sub_cluster(
+            sc_centroid, sc_others, llm_func, max_retries_per_step, sc_tag,
+        )
+
+        if kh.get("steps"):
+            try:
+                norm_prompt = kh_normalize_steps(
+                    json.dumps(kh, ensure_ascii=False, indent=2)
+                )
+                norm_result = _llm_call_with_retry(
+                    llm_func, norm_prompt, parse_json=True,
+                    max_retries=max_retries_per_step,
+                )
+                new_steps = norm_result.get("steps") if isinstance(norm_result, dict) else None
+                if new_steps and isinstance(new_steps, list):
+                    kh["steps"] = new_steps
+            except Exception:
+                pass
+
+        all_khs.append(kh)
+
+        if sub_edge_samples:
+            child_khs = _refine_edge_samples(
+                sub_edge_samples, llm_func, max_retries_per_step,
+                cluster_key, depth=depth + 1,
+                embedding_func=embedding_func,
+                cosine_threshold=cosine_threshold,
+                tfidf_weight=tfidf_weight,
+                embedding_weight=embedding_weight,
+            )
+            all_khs.extend(child_khs)
+
+    return all_khs
+
+
+def _refine_sub_cluster(
+    centroid: dict,
+    sorted_others: list[dict],
+    llm_func,
+    max_retries: int,
+    tag: str,
+) -> tuple[dict, list[dict], list[dict]]:
+    """
+    对单个子簇执行质心生成 → 验证 → patch 流程（与主流程相同逻辑，但不写文件）。
+
+    Returns
+    -------
+    (know_how, edge_samples, refinement_log)
+    - know_how: 该子簇生成的结构化 KH
+    - edge_samples: 无法被吸收的边缘样本列表（用于递归）
+    - refinement_log: 精炼日志
+    """
+    inp = centroid.get("input", {})
+
+    print(f"      [{tag}] 质心 index={centroid['index']}，开始结构化生成...")
+    prompt = structured_kh_generate(
+        know_how_text=centroid["Know_How"],
+        question=inp.get("question", ""),
+        answer=inp.get("answer", ""),
+        extra_info=inp.get("Extra_Information", ""),
+        reasoning=inp.get("reasoning", ""),
+    )
+    know_how = _llm_call_with_retry(llm_func, prompt, parse_json=True,
+                                     max_retries=max_retries)
+
+    _ci = centroid["index"]
+    for _step in know_how.get("steps", []):
+        _oc = _step.get("outcome")
+        _step["outcome"] = append_qa_footnote(
+            "" if _oc is None else str(_oc), _ci
+        )
+    for _exc in know_how.get("exceptions", []):
+        if "then" in _exc:
+            _exc["then"] = append_qa_footnote(_exc["then"], _ci)
+
+    know_how["source_qa_ids"] = [_ci]
+    know_how["edge_qa_ids"] = []
+
+    refinement_log = [{
+        "index": _ci, "role": "centroid",
+        "match_level": "centroid",
+        "action": "generated structured know-how",
+    }]
+
+    edge_samples: list[dict] = []
+
+    for seq, sample in enumerate(sorted_others, 1):
+        s_inp = sample.get("input", {})
+        s_q = s_inp.get("question", "")
+        s_a = s_inp.get("answer", "")
+        s_ei = s_inp.get("Extra_Information", "")
+        s_r = s_inp.get("reasoning", "")
+        s_idx = sample["index"]
+
+        validate_prompt = kh_inference_validate(
+            know_how_json=json.dumps(know_how, ensure_ascii=False, indent=2),
+            question=s_q, answer=s_a, extra_info=s_ei, reasoning=s_r,
+        )
+        validation = _llm_call_with_retry(llm_func, validate_prompt,
+                                           parse_json=True, max_retries=max_retries)
+
+        match_level = validation.get("match_level", "irrelevant").strip().lower()
+        mismatch_analysis = validation.get("mismatch_analysis", "")
+
+        if match_level == "answerable":
+            know_how["source_qa_ids"].append(s_idx)
+            refinement_log.append({
+                "index": s_idx, "role": "validated",
+                "match_level": "answerable", "action": "skip",
+            })
+            print(f"      [{tag}] sample {seq}/{len(sorted_others)} "
+                  f"index={s_idx}: answerable ✓")
+
+        elif match_level == "augmentable":
+            update_prompt = kh_minimal_update(
+                know_how_json=json.dumps(know_how, ensure_ascii=False, indent=2),
+                question=s_q, answer=s_a,
+                mismatch_analysis=mismatch_analysis, extra_info=s_ei,
+            )
+            update_result = _llm_call_with_retry(llm_func, update_prompt,
+                                                  parse_json=True, max_retries=max_retries)
+
+            ops = update_result.get("operations", [])
+            diff_desc = update_result.get("diff_description", "")
+
+            if ops:
+                know_how, patch_log = apply_patch(know_how, ops, qa_index=s_idx)
+                applied = [p for p in patch_log if p["status"] == "applied"]
+            else:
+                applied = []
+
+            if applied:
+                know_how["source_qa_ids"].append(s_idx)
+                refinement_log.append({
+                    "index": s_idx, "role": "validated",
+                    "match_level": "augmentable",
+                    "action": f"patched ({len(applied)} ops): {diff_desc}",
+                })
+                print(f"      [{tag}] sample {seq}/{len(sorted_others)} "
+                      f"index={s_idx}: augmentable → patched {len(applied)} ops")
+            else:
+                know_how["edge_qa_ids"].append(s_idx)
+                edge_samples.append(sample)
+                refinement_log.append({
+                    "index": s_idx, "role": "validated",
+                    "match_level": "augmentable",
+                    "action": "patch_failed → edge",
+                })
+                print(f"      [{tag}] sample {seq}/{len(sorted_others)} "
+                      f"index={s_idx}: augmentable → patch 全失败 → edge")
+
+        else:
+            know_how["edge_qa_ids"].append(s_idx)
+            edge_samples.append(sample)
+            refinement_log.append({
+                "index": s_idx, "role": "validated",
+                "match_level": "irrelevant", "action": "edge",
+            })
+            print(f"      [{tag}] sample {seq}/{len(sorted_others)} "
+                  f"index={s_idx}: irrelevant → edge")
+
+    return know_how, edge_samples, refinement_log
+
+
 def _refine_single_cluster(
     cluster_idx: int,
     cluster: dict,
@@ -115,12 +361,19 @@ def _refine_single_cluster(
     output_file: str,
     edge_cases_file: str,
     max_retries_per_step: int = 5,
+    embedding_func=None,
+    cosine_threshold: float = 0.75,
+    tfidf_weight: float = 1.0,
+    embedding_weight: float = 0.0,
 ):
     """
     对单个簇执行增量精炼：
     1. 质心样本 → 生成结构化 Know-How
-    2. 其余样本按 cosine 降序逐个验证
-    3. full → 跳过, partial → 最小更新, none → 边缘案例
+    2. 其余样本按 cosine 降序逐个验证（三档：answerable / augmentable / irrelevant）
+    3. answerable → 挂钩 source_qa_ids
+       augmentable → patch 补充后挂钩 source_qa_ids（patch 全失败则降级 irrelevant）
+       irrelevant → 挂钩 edge_qa_ids
+    4. 边缘样本递归聚类 → 质心 → 验证/patch，生成与主 KH 平级的 know-how
     """
     centroid = cluster["centroid_item"]
     sorted_others = cluster["sorted_others"]
@@ -153,8 +406,9 @@ def _refine_single_cluster(
     for _exc in know_how.get("exceptions", []):
         if "then" in _exc:
             _exc["then"] = append_qa_footnote(_exc["then"], _ci)
-    for _j, _con in enumerate(know_how.get("constraints", [])):
-        know_how["constraints"][_j] = append_qa_footnote(_con, _ci)
+
+    know_how["source_qa_ids"] = [centroid["index"]]
+    know_how["edge_qa_ids"] = []
 
     refinement_log = [{
         "index": centroid["index"],
@@ -165,40 +419,43 @@ def _refine_single_cluster(
 
     # ── Step 2: 逐样本验证 ────────────────────────────────────────────────
     edge_cases = []
+    edge_samples_for_recurse: list[dict] = []
 
     for seq, sample in enumerate(sorted_others, 1):
         s_inp = sample.get("input", {})
         s_q = s_inp.get("question", "")
         s_a = s_inp.get("answer", "")
         s_ei = s_inp.get("Extra_Information", "")
+        s_r = s_inp.get("reasoning", "")
         s_idx = sample["index"]
         s_kh_text = sample.get("Know_How", "")
 
-        # 推理验证
         validate_prompt = kh_inference_validate(
             know_how_json=json.dumps(know_how, ensure_ascii=False, indent=2),
             question=s_q,
             answer=s_a,
             extra_info=s_ei,
+            reasoning=s_r,
         )
         validation = _llm_call_with_retry(llm_func, validate_prompt, parse_json=True,
                                            max_retries=max_retries_per_step)
 
-        match_level = validation.get("match_level", "none").strip().lower()
+        match_level = validation.get("match_level", "irrelevant").strip().lower()
         derived_answer = validation.get("derived_answer", "")
         mismatch_analysis = validation.get("mismatch_analysis", "")
 
-        if match_level == "full":
+        if match_level == "answerable":
+            know_how["source_qa_ids"].append(s_idx)
             refinement_log.append({
                 "index": s_idx,
                 "role": "validated",
-                "match_level": "full",
+                "match_level": "answerable",
                 "action": "skip",
             })
             print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
-                  f"index={s_idx}: full match ✓")
+                  f"index={s_idx}: answerable ✓")
 
-        elif match_level == "partial":
+        elif match_level == "augmentable":
             update_prompt = kh_minimal_update(
                 know_how_json=json.dumps(know_how, ensure_ascii=False, indent=2),
                 question=s_q,
@@ -219,19 +476,31 @@ def _refine_single_cluster(
                 skipped = [p for p in patch_log if p["status"] == "skipped"]
                 if skipped:
                     print(f"    [{cluster_key}]   ⚠ {len(skipped)} 个操作被跳过: "
-                          f"{[s['detail'] for s in skipped]}")
+                          f"{[sk['detail'] for sk in skipped]}")
             else:
                 patch_log = []
                 applied = []
 
-            if not applied:
+            if applied:
+                know_how["source_qa_ids"].append(s_idx)
+                refinement_log.append({
+                    "index": s_idx,
+                    "role": "validated",
+                    "match_level": "augmentable",
+                    "action": f"patched ({len(applied)} ops): {diff_desc}",
+                    "patch_log": patch_log,
+                })
+                print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
+                      f"index={s_idx}: augmentable → patched {len(applied)} ops "
+                      f"({diff_desc[:60]})")
+            else:
+                know_how["edge_qa_ids"].append(s_idx)
+                edge_samples_for_recurse.append(sample)
                 edge_cases.append({
                     "index": s_idx,
                     "input": {
-                        "question": s_q,
-                        "answer": s_a,
-                        "extra_info": s_ei,
-                        "know_how": s_kh_text,
+                        "question": s_q, "answer": s_a,
+                        "extra_info": s_ei, "know_how": s_kh_text,
                     },
                     "inference_result": derived_answer,
                     "mismatch_reason": mismatch_analysis,
@@ -241,32 +510,21 @@ def _refine_single_cluster(
                 refinement_log.append({
                     "index": s_idx,
                     "role": "validated",
-                    "match_level": "partial",
-                    "action": f"patch_failed (0/{len(ops)} ops applied) → edge_case",
+                    "match_level": "augmentable",
+                    "action": f"patch_failed (0/{len(ops)} ops) → edge",
                     "patch_log": patch_log,
                 })
                 print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
-                      f"index={s_idx}: partial → patch 全部失败 → 转入边缘案例")
-            else:
-                refinement_log.append({
-                    "index": s_idx,
-                    "role": "validated",
-                    "match_level": "partial",
-                    "action": f"patched ({len(applied)} ops): {diff_desc}",
-                    "patch_log": patch_log,
-                })
-                print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
-                      f"index={s_idx}: partial → patched {len(applied)} ops "
-                      f"({diff_desc[:60]})")
+                      f"index={s_idx}: augmentable → patch 全失败 → 降级 edge")
 
-        else:
+        else:  # irrelevant
+            know_how["edge_qa_ids"].append(s_idx)
+            edge_samples_for_recurse.append(sample)
             edge_cases.append({
                 "index": s_idx,
                 "input": {
-                    "question": s_q,
-                    "answer": s_a,
-                    "extra_info": s_ei,
-                    "know_how": s_kh_text,
+                    "question": s_q, "answer": s_a,
+                    "extra_info": s_ei, "know_how": s_kh_text,
                 },
                 "inference_result": derived_answer,
                 "mismatch_reason": mismatch_analysis,
@@ -274,11 +532,11 @@ def _refine_single_cluster(
             refinement_log.append({
                 "index": s_idx,
                 "role": "validated",
-                "match_level": "none",
+                "match_level": "irrelevant",
                 "action": "edge_case",
             })
             print(f"    [{cluster_key}] sample {seq}/{len(sorted_others)} "
-                  f"index={s_idx}: none → edge case")
+                  f"index={s_idx}: irrelevant → edge")
 
     # ── Step 3: LLM 步骤编号归一化 ──────────────────────────────────────────
     if know_how.get("steps"):
@@ -304,19 +562,31 @@ def _refine_single_cluster(
         except Exception as e:
             print(f"  [{cluster_key}] 步骤编号归一化失败，保留原始编号: {str(e)[:120]}")
 
-    # ── Step 4: 写入结果 ──────────────────────────────────────────────────
+    # ── Step 4: 边缘样本递归聚类 → 生成平级 KH ─────────────────────────────
+    edge_know_hows: list[dict] = []
+    if edge_samples_for_recurse:
+        print(f"  [{cluster_key}] {len(edge_samples_for_recurse)} 个边缘样本，"
+              f"进入递归聚类...")
+        edge_know_hows = _refine_edge_samples(
+            edge_samples_for_recurse, llm_func, max_retries_per_step,
+            cluster_key, depth=1,
+            embedding_func=embedding_func,
+            cosine_threshold=cosine_threshold,
+            tfidf_weight=tfidf_weight,
+            embedding_weight=embedding_weight,
+        )
+        print(f"  [{cluster_key}] 边缘递归完成: 生成 {len(edge_know_hows)} 个平级 KH")
+
+    # ── Step 5: 写入结果 ──────────────────────────────────────────────────
     kh_title = know_how.get("title", cluster_key)
 
     result = {
         "cluster_index": cluster_idx,
         "know_how": know_how,
         "centroid_index": centroid["index"],
-        "absorbed_indices": [centroid["index"]] + [
-            log["index"] for log in refinement_log
-            if log.get("match_level") in ("full", "partial")
-            and log.get("role") != "centroid"
-        ],
-        "edge_case_indices": [ec["index"] for ec in edge_cases],
+        "absorbed_indices": list(know_how["source_qa_ids"]),
+        "edge_case_indices": list(know_how["edge_qa_ids"]),
+        "edge_know_hows": edge_know_hows,
         "cluster_keywords": cluster.get("keywords", []),
         "cluster_cohesion": cluster.get("cohesion"),
         "group_label": cluster.get("group_label", ""),
@@ -331,21 +601,30 @@ def _refine_single_cluster(
         append_edge_cases(cluster_key, edge_cases, edge_cases_file)
 
     total_in_cluster = 1 + len(sorted_others)
-    absorbed = len(result["absorbed_indices"])
+    absorbed = len(know_how["source_qa_ids"])
     print(f"  [{cluster_key}] 完成: {absorbed}/{total_in_cluster} 样本被吸收, "
-          f"{len(edge_cases)} 边缘案例, title=\"{kh_title}\"")
+          f"{len(edge_cases)} 边缘案例 → 递归生成 {len(edge_know_hows)} 个平级KH, "
+          f"title=\"{kh_title}\"")
 
     return cluster_idx, "success", result
 
 
 def _refine_single_cluster_safe(cluster_idx, cluster, total_clusters,
                                  llm_func, output_file, edge_cases_file,
-                                 max_retries_per_step):
+                                 max_retries_per_step,
+                                 embedding_func=None,
+                                 cosine_threshold=0.75,
+                                 tfidf_weight=1.0,
+                                 embedding_weight=0.0):
     """带顶层异常捕获的簇精炼，确保不会崩溃整个线程池。"""
     try:
         return _refine_single_cluster(
             cluster_idx, cluster, total_clusters,
             llm_func, output_file, edge_cases_file, max_retries_per_step,
+            embedding_func=embedding_func,
+            cosine_threshold=cosine_threshold,
+            tfidf_weight=tfidf_weight,
+            embedding_weight=embedding_weight,
         )
     except Exception as e:
         error_msg = traceback.format_exc()
@@ -489,6 +768,10 @@ def run_level2_refinement(
                 _refine_single_cluster_safe,
                 i, c, len(clusters), llm_func,
                 output_file, edge_cases_file, max_retries_per_step,
+                embedding_func=embedding_func,
+                cosine_threshold=cosine_threshold,
+                tfidf_weight=tfidf_weight,
+                embedding_weight=embedding_weight,
             ): i
             for i, c in pending
         }

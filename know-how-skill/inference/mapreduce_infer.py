@@ -5,7 +5,7 @@ MapReduce 推理模块（v2）
   Phase 1: 双路并行检索（TF-IDF + Dense Embedding）
   Phase 2: 并行 Map 推理（含有效性校验）
   Phase 3: 边缘案例兜底（仅 QA Know-How）
-  Phase 4: Reduce 融合推理
+  Phase 4: 分层 Reduce 融合推理（流式批次 + 递归归并）
 """
 
 import json
@@ -13,6 +13,7 @@ import os
 import concurrent.futures
 import threading
 from typing import Callable
+from .prompts_infer import reduce_batch_v0, reduce_final_v0
 from tqdm import tqdm
 
 import time
@@ -22,12 +23,14 @@ from .retrieval import (
     retrieve_candidates,
     load_knowledge_content,
     load_edge_cases,
+    load_edge_know_hows,
+    render_edge_know_how,
     load_level1_knowhow_map,
+    build_qa_to_cluster_map,
     retrieve_edge_cases,
     format_edge_cases_text,
     QADirectRetriever,
     retrieve_qa_direct_candidates,
-    format_qa_direct_text,
 )
 
 
@@ -157,82 +160,285 @@ def _run_llm_bare_map_task(
     return result
 
 
-# ─── Phase 3: 边缘案例兜底 ──────────────────────────────────────────────────
+# ─── Phase 3: 边缘案例兜底（基于 edge_know_hows 结构化 KH 推理）────────────
 
-def _run_edge_case_fallback(
+def _run_edge_kh_infer(
     task_input: dict,
     llm_func: Callable,
-    edge_case_prompt_func: Callable,
-    tfidf_top_n: int = 5,
-    embedding_top_n: int = 5,
-    embedding_func: Callable = None,
+    infer_prompt_func: Callable,
 ) -> dict:
-    """对 QA Know-How 中 Map 判定无效的条目，用边缘案例做兜底推理。
-
-    通过双路独立检索（TF-IDF Top-N + Dense Top-N → 并集去重）筛选最相关的边缘案例，
-    并附带 Level-1 Know-How 作为辅助推理上下文。
-    """
+    """对单个 edge KH 执行推理，流程与 Phase 2 的 Map 推理完全一致。"""
     question = task_input["question"]
-    knowledge_dir = task_input["knowledge_dir"]
-    entry_key = task_input["entry_key"]
-    level1_map = task_input.get("level1_map", {})
+    kh_text = task_input["kh_text"]
+    pitfalls = task_input.get("pitfalls", "")
 
-    _empty = {
+    _base = {
         "q_idx": task_input["q_idx"],
         "source_dir": task_input["source_dir"],
-        "entry_key": entry_key,
+        "entry_key": task_input["entry_key"],
         "knowledge_type": "qa_v2",
-        "kh_source_id": f"{task_input['source_dir']}:{entry_key}:edge",
-        "Match_Status": "NO",
-        "Rejection_Reason": "无可用边缘案例",
-        "Reasoning_Chain": "",
-        "Derived_Answer": "",
+        "kh_source_id": task_input["kh_source_id"],
         "is_edge_case_fallback": True,
-        "ec_text": "",
-        "ec_knowhow_entry_key": entry_key,
-        "ec_matched_qa_indices": [],
+        "edge_kh_index": task_input.get("edge_kh_index"),
+        "edge_kh_title": task_input.get("edge_kh_title", ""),
+        "edge_kh_source_qa_ids": task_input.get("edge_kh_source_qa_ids", []),
     }
 
-    all_edge_cases = load_edge_cases(knowledge_dir, entry_key)
-    if not all_edge_cases:
-        return _empty
-
-    edge_cases = retrieve_edge_cases(
-        question, all_edge_cases,
-        tfidf_top_n=tfidf_top_n,
-        embedding_top_n=embedding_top_n,
-        embedding_func=embedding_func,
-        level1_map=level1_map,
-    )
-    if not edge_cases:
-        return _empty
-
-    ec_matched_qa_indices = [ec.get("index") for ec in edge_cases if ec.get("index") is not None]
-
-    ec_text = format_edge_cases_text(edge_cases, level1_map=level1_map)
-
     try:
-        prompt = edge_case_prompt_func(question, ec_text)
+        prompt = infer_prompt_func(question, kh_text, pitfalls)
         raw = llm_func(prompt)["content"]
         result = json.loads(_clean_json_string(raw))
     except Exception as e:
         result = {
             "Match_Status": "NO",
-            "Rejection_Reason": f"边缘案例推理失败: {e}",
+            "Rejection_Reason": f"Edge KH 推理失败: {e}",
             "Reasoning_Chain": "",
             "Derived_Answer": "",
         }
 
-    result["q_idx"] = task_input["q_idx"]
-    result["source_dir"] = task_input["source_dir"]
-    result["entry_key"] = entry_key
-    result["knowledge_type"] = "qa_v2"
-    result["kh_source_id"] = f"{task_input['source_dir']}:{entry_key}:edge"
-    result["is_edge_case_fallback"] = True
-    result["ec_text"] = ec_text
-    result["ec_knowhow_entry_key"] = entry_key
-    result["ec_matched_qa_indices"] = ec_matched_qa_indices
+    result.update(_base)
     return result
+
+
+def _run_edge_case_fallback_batch(
+    task_input: dict,
+    llm_func: Callable,
+    infer_prompt_func: Callable,
+    pitfalls_text: str = "",
+    max_workers: int = 4,
+) -> list[dict]:
+    """对指定 cluster 的所有 edge_know_hows 并行执行推理。
+
+    edge_know_hows 是扁平列表，包含所有递归层级产出的 KH。
+    每个 edge KH 之间无依赖，全部并行推理。
+    """
+    knowledge_dir = task_input["knowledge_dir"]
+    entry_key = task_input["entry_key"]
+
+    edge_khs = load_edge_know_hows(knowledge_dir, entry_key)
+    if not edge_khs:
+        return []
+
+    sub_tasks = []
+    for i, ekh in enumerate(edge_khs):
+        kh_text = render_edge_know_how(ekh)
+        if not kh_text.strip():
+            continue
+        sub_tasks.append({
+            "q_idx": task_input["q_idx"],
+            "question": task_input["question"],
+            "source_dir": task_input["source_dir"],
+            "entry_key": entry_key,
+            "kh_source_id": f"{task_input['source_dir']}:{entry_key}:edge_{i}",
+            "kh_text": kh_text,
+            "pitfalls": pitfalls_text,
+            "edge_kh_index": i,
+            "edge_kh_title": ekh.get("title", ""),
+            "edge_kh_source_qa_ids": ekh.get("source_qa_ids", []),
+        })
+
+    if not sub_tasks:
+        return []
+
+    if len(sub_tasks) == 1:
+        return [_run_edge_kh_infer(sub_tasks[0], llm_func, infer_prompt_func)]
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(sub_tasks))) as executor:
+        futures = {
+            executor.submit(_run_edge_kh_infer, st, llm_func, infer_prompt_func): st
+            for st in sub_tasks
+        }
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                st = futures[future]
+                results.append({
+                    "q_idx": st["q_idx"],
+                    "source_dir": st["source_dir"],
+                    "entry_key": st["entry_key"],
+                    "knowledge_type": "qa_v2",
+                    "kh_source_id": st["kh_source_id"],
+                    "is_edge_case_fallback": True,
+                    "edge_kh_index": st.get("edge_kh_index"),
+                    "Match_Status": "NO",
+                    "Rejection_Reason": f"Edge KH 并行推理异常: {e}",
+                    "Reasoning_Chain": "",
+                    "Derived_Answer": "",
+                })
+    return results
+
+
+# ─── 分层 Reduce 辅助函数 ──────────────────────────────────────────────────
+
+def _format_reduce_item(item: dict) -> str:
+    """将一个推理结果（原始 Map 结果或中间 Reduce 结果）格式化为文本片段。"""
+    if "conclusion" in item:
+        text = f"结论: {item['conclusion']}\n推理: {item['reasoning']}"
+        if item.get("dissenting_view"):
+            text += f"\n少数派观点: {item['dissenting_view']}"
+        return text
+    source_tag = "知识块"
+    if item.get("is_llm_bare"):
+        source_tag = "LLM裸考"
+    elif item.get("is_qa_direct"):
+        source_tag = "QA直检"
+    elif item.get("is_edge_case_fallback"):
+        source_tag = "边缘案例兜底"
+    return (
+        f"来源: {source_tag} [{item.get('kh_source_id', '?')}]\n"
+        f"推导逻辑: {item.get('Reasoning_Chain', '')}\n"
+        f"候选答案: {item.get('Derived_Answer', '')}"
+    )
+
+
+def _format_items_for_reduce(items: list) -> str:
+    """将多个推理结果格式化为 Reduce prompt 输入文本。"""
+    fragments = []
+    for i, item in enumerate(items, 1):
+        fragments.append(f"--- 候选 {i} ---\n{_format_reduce_item(item)}")
+    return "\n\n".join(fragments)
+
+
+def _call_batch_reduce(
+    question: str,
+    answers_text: str,
+    llm_func: Callable,
+) -> dict:
+    """调用中间层批次 Reduce（reduce_batch_v0）。"""
+    prompt = reduce_batch_v0(question, answers_text)
+    try:
+        raw = llm_func(prompt)["content"]
+        result = json.loads(_clean_json_string(raw))
+    except Exception as e:
+        result = {
+            "conclusion": f"批次Reduce解析失败: {e}",
+            "reasoning": "",
+            "vote_distribution": "",
+            "dissenting_view": "",
+        }
+    return result
+
+
+def _call_final_reduce(
+    question: str,
+    answers_text: str,
+    result_count: int,
+    llm_func: Callable,
+) -> dict:
+    """调用最终层 Reduce（reduce_final_v0）。"""
+    prompt = reduce_final_v0(question, answers_text, result_count)
+    try:
+        raw = llm_func(prompt)["content"]
+        result = json.loads(_clean_json_string(raw))
+    except Exception as e:
+        result = {
+            "Synthesis_Analysis": f"最终Reduce解析失败: {e}",
+            "Final_Answer": "",
+        }
+    return result
+
+
+def _drain_pending_reduce(
+    pending_reduce: list,
+    reduce_batch_size: int,
+    question: str,
+    llm_func: Callable,
+    reduce_executor,
+    layer1_futures: list,
+    _log: Callable,
+):
+    """将 pending_reduce 中达到水位线的部分提交为 Layer 1 Reduce 任务。"""
+    while len(pending_reduce) >= reduce_batch_size:
+        batch = pending_reduce[:reduce_batch_size]
+        del pending_reduce[:reduce_batch_size]
+        answers_text = _format_items_for_reduce(batch)
+        fut = reduce_executor.submit(
+            _call_batch_reduce, question, answers_text, llm_func,
+        )
+        layer1_futures.append(fut)
+        _log("Reduce-L1",
+             f"提交批次 ({reduce_batch_size} 条) -> Layer1 Reduce #{len(layer1_futures)}")
+
+
+def _run_hierarchical_reduce(
+    items: list,
+    question: str,
+    llm_func: Callable,
+    batch_size: int = 3,
+    _log: Callable = None,
+) -> dict:
+    """Layer 2+ 递归归并 + 最终 Reduce。
+
+    接收 Layer 1 Reduce 中间结论 + 剩余未凑满批次的原始有效结果，
+    递归分批 Reduce 直到结果数 <= batch_size，然后执行最终 Reduce。
+    """
+    if _log is None:
+        _log = lambda phase, msg: None
+
+    if not items:
+        return {
+            "Synthesis_Analysis": "无有效推理结果",
+            "Final_Answer": "",
+        }
+
+    if len(items) == 1:
+        item = items[0]
+        if "conclusion" in item:
+            return {
+                "Synthesis_Analysis": f"仅一条候选结论（投票: {item.get('vote_distribution', '?')}）",
+                "Final_Answer": item.get("conclusion", "") + "\n" + item.get("reasoning", ""),
+            }
+        return {
+            "Synthesis_Analysis": "仅一条有效推理结果",
+            "Final_Answer": item.get("Derived_Answer", ""),
+        }
+
+    if len(items) <= batch_size:
+        answers_text = _format_items_for_reduce(items)
+        _log("Reduce", f"最终层 Reduce: {len(items)} 条结果 -> Final Reduce")
+        return _call_final_reduce(question, answers_text, len(items), llm_func)
+
+    layer = 2
+    while len(items) > batch_size:
+        next_layer = []
+        i = 0
+        batch_count = 0
+        reduce_futures = []
+
+        workers = min(4, max(2, len(items) // batch_size))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            while i + batch_size <= len(items):
+                batch = items[i:i + batch_size]
+                answers_text = _format_items_for_reduce(batch)
+                reduce_futures.append(
+                    executor.submit(_call_batch_reduce, question, answers_text, llm_func)
+                )
+                batch_count += 1
+                i += batch_size
+
+            remainder = items[i:]
+
+            for fut in concurrent.futures.as_completed(reduce_futures):
+                try:
+                    next_layer.append(fut.result())
+                except Exception as e:
+                    next_layer.append({
+                        "conclusion": f"Layer {layer} Reduce 异常: {e}",
+                        "reasoning": "",
+                        "vote_distribution": "",
+                        "dissenting_view": "",
+                    })
+
+        next_layer.extend(remainder)
+        _log("Reduce", f"Layer {layer}: {len(items)} -> {len(next_layer)} 条（{batch_count} 个批次）")
+        items = next_layer
+        layer += 1
+
+    answers_text = _format_items_for_reduce(items)
+    _log("Reduce", f"最终层 Reduce: {len(items)} 条结果 -> Final Reduce")
+    return _call_final_reduce(question, answers_text, len(items), llm_func)
 
 
 # ─── Phase 4: Reduce 融合 ───────────────────────────────────────────────────
@@ -242,7 +448,7 @@ def _run_reduce_task(
     llm_func: Callable,
     summary_prompt_func: Callable,
 ) -> dict:
-    """汇总所有有效 Map 推理结果（含 LLM 裸考），融合生成最终答案。"""
+    """[DEPRECATED] 旧版单层 Reduce，已被分层 Reduce 替代。保留仅为向后兼容。"""
     q_idx = task_input["q_idx"]
     question = task_input["question"]
     valid_results = task_input["valid_results"]
@@ -297,6 +503,7 @@ def run_mapreduce_inference(
     extra_llm_func: Callable = None,
     extra_vendor: str = "volc",
     extra_model: str = "deepseek-v3.2",
+    force_extra_llm: bool = False,
     embedding_func: Callable = None,
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
@@ -306,6 +513,7 @@ def run_mapreduce_inference(
     enable_qa_direct: bool = True,
     pre_built_retrievers=None,
     on_question_done: Callable = None,
+    reduce_batch_size: int = 3,
 ) -> list[dict]:
     """
     完整 MapReduce 推理流水线（含 QA 直检并行路径）。
@@ -318,10 +526,13 @@ def run_mapreduce_inference(
     reduce_llm_func          : Reduce 阶段 LLM 函数
     infer_prompt_func        : Map prompt 构造函数
     summary_prompt_func      : Reduce prompt 构造函数
-    edge_case_prompt_func    : Phase 3 边缘案例兜底 prompt 构造函数
+    edge_case_prompt_func    : （已废弃）Phase 3 现在直接用 infer_prompt_func 对 edge_know_hows 推理，此参数保留兼容
     qa_direct_prompt_func    : QA 直检 Map prompt 构造函数
     pitfalls_func            : 陷阱提示函数，可选
-    extra_llm_func           : 额外信息 LLM 函数（裸考），可选
+    extra_llm_func           : 额外信息 LLM 函数（裸考），始终参与并行推理
+    force_extra_llm          : 是否强制将 LLM 裸考结果纳入 Reduce 融合。
+                               False（默认）= 仅在无其他有效匹配时才使用裸考结果；
+                               True = 始终将裸考结果作为候选纳入 Reduce。
     embedding_func           : Dense embedding 函数，可选
     tfidf_top_n              : 所有双路检索共享的 TF-IDF Top-N
     embedding_top_n          : 所有双路检索共享的 Dense Embedding Top-N
@@ -332,6 +543,8 @@ def run_mapreduce_inference(
     enable_qa_direct         : 是否启用 QA 直检并行路径（默认开启）
     pre_built_retrievers     : 预构建的 KnowledgeRetriever 列表，避免每题重复加载索引
     on_question_done         : 每道题完成后的回调 on_question_done(result)，用于增量保存
+    reduce_batch_size        : 分层 Reduce 批次大小（必须为奇数，默认 3）。
+                               Map 结果达到此水位线时立即提交 Layer 1 Reduce
 
     Returns
     -------
@@ -350,16 +563,8 @@ def run_mapreduce_inference(
         retrievers = build_retrievers(knowledge_dirs)
         print(f"[Infer] 检索器构建完成: {len(retrievers)} 个目录")
 
-    # ── 预加载 Level-1 Know-How 映射（用于 Phase 3 边缘案例兜底）──
+    # ── 预加载 Level-1 Know-How 映射（Phase 3 已改用 edge_know_hows，此处保留供 QA 直检等使用）──
     level1_maps: dict[str, dict[int, str]] = {}
-    if enable_edge_cases and edge_case_prompt_func is not None:
-        for d in knowledge_dirs:
-            l1 = load_level1_knowhow_map(d)
-            if l1:
-                level1_maps[d] = l1
-        if level1_maps:
-            total_l1 = sum(len(v) for v in level1_maps.values())
-            print(f"[Infer] 已加载 Level-1 Know-How 映射: {total_l1} 条")
 
     # ── 预加载 QA 直检 Retriever（仅 QA 类目录）──
     qa_direct_retrievers: list[QADirectRetriever] = []
@@ -387,6 +592,17 @@ def run_mapreduce_inference(
             total_qa = sum(len(r.qa_pairs) for r in qa_direct_retrievers)
             print(f"[Infer] 已加载 QA 直检索引: {total_qa} 条原始 QA "
                   f"(来自 {len(qa_direct_retrievers)} 个目录)")
+
+    # ── 预加载 QA index → Level-2 entry_key 反向映射（用于 QA 直检锚点关联）──
+    qa_to_cluster_maps: dict[str, dict[int, str]] = {}
+    if qa_direct_retrievers:
+        for d in knowledge_dirs:
+            m = build_qa_to_cluster_map(d)
+            if m:
+                qa_to_cluster_maps[d] = m
+        if qa_to_cluster_maps:
+            total_mapped = sum(len(v) for v in qa_to_cluster_maps.values())
+            print(f"[Infer] 已加载 QA→Cluster 反向映射: {total_mapped} 条")
 
     print("")
 
@@ -422,8 +638,9 @@ def run_mapreduce_inference(
         )
         _log("Phase1", f"Level-2 候选知识块: {len(candidates)} 个")
 
-        # ── Phase 1b: QA 直检并行检索 ─────────────────────────────────
+        # ── Phase 1b: QA 直检（锚点模式：仅用于关联 Level-2 知识块）────
         qa_direct_hits = []
+        qa_anchored_count = 0
         if qa_direct_retrievers:
             query_emb = None
             if embedding_func is not None:
@@ -437,9 +654,27 @@ def run_mapreduce_inference(
                 embedding_top_n=embedding_top_n,
                 query_embedding=query_emb,
             )
-        _log("Phase1", f"QA 直检命中: {len(qa_direct_hits)} 条")
+            if qa_direct_hits and qa_to_cluster_maps:
+                existing_keys = {(c["source_dir"], c["entry_key"]) for c in candidates}
+                for hit in qa_direct_hits:
+                    kd = hit["knowledge_dir"]
+                    cluster_map = qa_to_cluster_maps.get(kd, {})
+                    entry_key = cluster_map.get(hit["qa_index"])
+                    if entry_key is not None and (hit["source_dir"], entry_key) not in existing_keys:
+                        candidates.append({
+                            "source_dir": hit["source_dir"],
+                            "knowledge_dir": kd,
+                            "entry_key": entry_key,
+                            "knowledge_type": "qa_v2",
+                            "score": hit.get("score", 0.0),
+                            "retrieval_method": "qa_anchor",
+                        })
+                        existing_keys.add((hit["source_dir"], entry_key))
+                        qa_anchored_count += 1
+        _log("Phase1", f"QA 直检命中: {len(qa_direct_hits)} 条 → 关联 Level-2 新增: {qa_anchored_count} 个")
+        _log("Phase1", f"合并后候选知识块总数: {len(candidates)} 个")
 
-        if not candidates and not qa_direct_hits:
+        if not candidates:
             _log("Phase1", "无任何候选，跳过此题")
             pbar.update(1)
             return _build_empty_result(q_idx, question)
@@ -463,33 +698,24 @@ def run_mapreduce_inference(
                 "retrieval_score": cand["score"],
             })
 
-        # 构建 QA 直检 Map 任务
-        qa_direct_tasks = []
-        for hit in qa_direct_hits:
-            qa_direct_tasks.append({
-                "q_idx": q_idx,
-                "question": question,
-                "source_dir": hit["source_dir"],
-                "qa_index": hit["qa_index"],
-                "qa_text": format_qa_direct_text(hit),
-                "qa_question": hit["question"],
-                "qa_answer": hit["answer"],
-                "qa_know_how": hit["know_how"],
-            })
-
-        if not map_tasks and not qa_direct_tasks:
+        if not map_tasks:
             _log("Phase1", "知识块内容为空，跳过此题")
             pbar.update(1)
             return _build_empty_result(q_idx, question)
 
-        # ── Phase 2: 并行 Map 推理（Level-2 知识块 + QA 直检 + LLM 裸考 同时进行）──
+        # ── 分层 Reduce 基础设施 ──
+        pending_reduce = []
+        layer1_reduce_futures = []
+        reduce_exec = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        all_valid = []
+
+        # ── Phase 2: 并行 Map 推理（Level-2 知识块 + LLM 裸考 同时进行）──
         bare_enabled = extra_llm_func is not None
-        total_map_tasks = len(map_tasks) + len(qa_direct_tasks) + (1 if bare_enabled else 0)
-        _log("Phase2", f"启动并行 Map: L2={len(map_tasks)}, QA直检={len(qa_direct_tasks)}, "
+        total_map_tasks = len(map_tasks) + (1 if bare_enabled else 0)
+        _log("Phase2", f"启动并行 Map: L2={len(map_tasks)}, "
              f"裸考={1 if bare_enabled else 0}，共 {total_map_tasks} 个任务，并发={map_max_workers}")
 
         map_results = []
-        qa_direct_results = []
         llm_bare_result = None
         with concurrent.futures.ThreadPoolExecutor(max_workers=map_max_workers) as executor:
             l2_futures = {
@@ -498,13 +724,6 @@ def run_mapreduce_inference(
                     infer_prompt_func, pitfalls_func,
                 ): ("l2", task)
                 for task in map_tasks
-            }
-            qd_futures = {
-                executor.submit(
-                    _run_qa_direct_map_task, task, map_llm_func,
-                    qa_direct_prompt_func, pitfalls_func,
-                ): ("qd", task)
-                for task in qa_direct_tasks
             }
             bare_futures = {}
             if extra_llm_func is not None:
@@ -515,7 +734,7 @@ def run_mapreduce_inference(
                         extra_llm_func, extra_vendor, extra_model,
                     ): ("bare", bare_task)
                 }
-            all_futures = {**l2_futures, **qd_futures, **bare_futures}
+            all_futures = {**l2_futures, **bare_futures}
             done_count = 0
             for future in concurrent.futures.as_completed(all_futures):
                 tag, _task = all_futures[future]
@@ -525,10 +744,14 @@ def run_mapreduce_inference(
                     done_count += 1
                     if tag == "l2":
                         map_results.append(result)
+                        if status == "YES":
+                            all_valid.append(result)
+                            pending_reduce.append(result)
+                            _drain_pending_reduce(
+                                pending_reduce, reduce_batch_size, question,
+                                reduce_llm_func, reduce_exec, layer1_reduce_futures, _log,
+                            )
                         _log("Phase2", f"  L2 [{done_count}/{total_map_tasks}] key={result.get('entry_key')} → {status}")
-                    elif tag == "qd":
-                        qa_direct_results.append(result)
-                        _log("Phase2", f"  QA直检 [{done_count}/{total_map_tasks}] qa_idx={result.get('qa_index')} → {status}")
                     else:
                         llm_bare_result = result
                         _log("Phase2", f"  裸考 [{done_count}/{total_map_tasks}] → {status}")
@@ -538,70 +761,104 @@ def run_mapreduce_inference(
 
         l2_valid = [r for r in map_results if r.get("Match_Status") == "YES"]
         rejected_results = [r for r in map_results if r.get("Match_Status") != "YES"]
-        qa_direct_valid = [r for r in qa_direct_results if r.get("Match_Status") == "YES"]
         bare_valid = llm_bare_result is not None and llm_bare_result.get("Match_Status") == "YES"
 
-        valid_results = list(l2_valid)
-        valid_results.extend(qa_direct_valid)
-        if bare_valid:
-            valid_results.append(llm_bare_result)
-
         _log("Phase2", f"完成: L2 {len(l2_valid)}/{len(map_results)} 有效, "
-             f"QA直检 {len(qa_direct_valid)}/{len(qa_direct_results)} 有效, "
              f"裸考 {'YES' if bare_valid else ('NO' if llm_bare_result else '未启用')}")
 
-        # ── Phase 3: 边缘案例兜底（仅 QA Know-How）──────────────────
+        # ── Phase 3: 边缘案例兜底（基于 edge_know_hows 结构化 KH）──
         edge_fallback_results = []
-        if enable_edge_cases and edge_case_prompt_func is not None:
+        if enable_edge_cases:
             qa_rejected = [
                 r for r in rejected_results
                 if r.get("knowledge_type") == "qa_v2"
             ]
             if qa_rejected:
                 _log("Phase3", f"触发边缘案例兜底: {len(qa_rejected)} 个被拒绝的 QA 知识块")
+                pp_text = pitfalls_func() if pitfalls_func is not None else ""
                 edge_tasks = []
                 for r in qa_rejected:
                     kd = _find_knowledge_dir(knowledge_dirs, r["source_dir"])
+                    if kd is None:
+                        continue
                     edge_tasks.append({
                         "q_idx": q_idx,
                         "question": question,
                         "source_dir": r["source_dir"],
                         "knowledge_dir": kd,
                         "entry_key": r["entry_key"],
-                        "level1_map": level1_maps.get(kd, {}),
                     })
                 with concurrent.futures.ThreadPoolExecutor(max_workers=map_max_workers) as executor:
                     futures = {
                         executor.submit(
-                            _run_edge_case_fallback, task,
-                            map_llm_func, edge_case_prompt_func,
-                            tfidf_top_n, embedding_top_n, embedding_func,
+                            _run_edge_case_fallback_batch, task,
+                            map_llm_func, infer_prompt_func,
+                            pp_text, map_max_workers,
                         ): task
                         for task in edge_tasks
-                        if task["knowledge_dir"] is not None
                     }
                     for future in concurrent.futures.as_completed(futures):
                         try:
-                            ec_result = future.result()
-                            edge_fallback_results.append(ec_result)
-                            if ec_result.get("Match_Status") == "YES":
-                                valid_results.append(ec_result)
-                            _log("Phase3", f"  兜底 key={ec_result.get('entry_key')} → {ec_result.get('Match_Status')}")
+                            batch_results = future.result()
+                            for ec_result in batch_results:
+                                edge_fallback_results.append(ec_result)
+                                if ec_result.get("Match_Status") == "YES":
+                                    all_valid.append(ec_result)
+                                    pending_reduce.append(ec_result)
+                                    _drain_pending_reduce(
+                                        pending_reduce, reduce_batch_size, question,
+                                        reduce_llm_func, reduce_exec, layer1_reduce_futures, _log,
+                                    )
+                                _log("Phase3",
+                                     f"  兜底 key={ec_result.get('entry_key')}:edge_{ec_result.get('edge_kh_index')} "
+                                     f"({ec_result.get('edge_kh_title', '')[:30]}) → {ec_result.get('Match_Status')}")
                         except Exception as exc:
                             print(f"  [-] EdgeCase 异常 (q_idx={q_idx}): {exc}")
 
                 edge_success = len([r for r in edge_fallback_results if r.get("Match_Status") == "YES"])
-                _log("Phase3", f"完成: {edge_success}/{len(edge_fallback_results)} 兜底成功")
+                _log("Phase3", f"完成: {edge_success}/{len(edge_fallback_results)} 个 edge KH 兜底成功")
             else:
                 _log("Phase3", "无被拒绝的 QA 知识块，跳过兜底")
         elif not enable_edge_cases:
             _log("Phase3", "已禁用（--no-edge-cases）")
 
-        # ── Phase 4: Reduce 融合 ───────────────────────────────────────
-        _log("Phase4", f"Reduce 融合: 汇总 {len(valid_results)} 个有效推理结果...")
-        reduce_result = _run_reduce_task(
-            {"q_idx": q_idx, "question": question, "valid_results": valid_results},
-            reduce_llm_func, summary_prompt_func,
+        # ── Phase 4: 分层 Reduce 融合 ─────────────────────────────────
+        bare_included = False
+        if bare_valid:
+            if force_extra_llm:
+                all_valid.append(llm_bare_result)
+                pending_reduce.append(llm_bare_result)
+                bare_included = True
+                _log("Phase4", "LLM 裸考结果已强制纳入 Reduce（--force-extra-llm）")
+            elif not all_valid:
+                all_valid.append(llm_bare_result)
+                pending_reduce.append(llm_bare_result)
+                bare_included = True
+                _log("Phase4", "无其他有效匹配，LLM 裸考结果作为兜底纳入 Reduce")
+            else:
+                _log("Phase4", f"已有 {len(all_valid)} 个有效匹配，LLM 裸考结果仅记录不参与 Reduce")
+
+        # 等待 Layer 1 Reduce 完成
+        layer1_results = []
+        if layer1_reduce_futures:
+            for fut in concurrent.futures.as_completed(layer1_reduce_futures):
+                try:
+                    layer1_results.append(fut.result())
+                except Exception as e:
+                    layer1_results.append({
+                        "conclusion": f"Layer 1 Reduce 异常: {e}",
+                        "reasoning": "",
+                        "vote_distribution": "",
+                        "dissenting_view": "",
+                    })
+        reduce_exec.shutdown(wait=True)
+
+        reduce_items = layer1_results + pending_reduce
+        _log("Phase4", f"分层 Reduce: L1中间结论={len(layer1_results)}, "
+             f"剩余={len(pending_reduce)}, 总计={len(reduce_items)}")
+
+        reduce_result = _run_hierarchical_reduce(
+            reduce_items, question, reduce_llm_func, reduce_batch_size, _log,
         )
 
         llm_bare_answer = ""
@@ -619,17 +876,17 @@ def run_mapreduce_inference(
             "retrieval_candidates_count": len(candidates),
             "map_total_evaluated": len(map_results),
             "map_match_count": len(l2_valid),
-            "qa_direct_count": len(qa_direct_results),
-            "qa_direct_match_count": len(qa_direct_valid),
+            "qa_direct_count": len(qa_direct_hits),
+            "qa_direct_match_count": qa_anchored_count,
             "edge_fallback_count": len(edge_fallback_results),
             "edge_fallback_match_count": len([
                 r for r in edge_fallback_results if r.get("Match_Status") == "YES"
             ]),
-            "total_valid_count": len(valid_results),
+            "total_valid_count": len(all_valid),
             "map_results": map_results,
-            "qa_direct_results": qa_direct_results,
+            "qa_direct_results": [],
             "edge_fallback_results": edge_fallback_results,
-            "valid_results": valid_results,
+            "valid_results": all_valid,
             "rejected_reasons": [
                 f"KH[{r.get('kh_source_id')}]: {r.get('Rejection_Reason')}"
                 for r in map_results if r.get("Match_Status") != "YES"
@@ -639,7 +896,7 @@ def run_mapreduce_inference(
             "final_answer": final_ans,
             "valid_kh_source_qa": _format_valid_kh_sources(l2_valid),
             "valid_edge_source_qa": _format_valid_edge_sources(edge_fallback_results),
-            "valid_qa_direct_source_qa": _format_valid_qa_direct_sources(qa_direct_valid),
+            "valid_qa_direct_source_qa": "",
         }
 
     # ── 串行 or 问题级并发 ──────────────────────────────────────────────────
@@ -849,6 +1106,7 @@ def run_mapreduce_inference_file(
     extra_llm_func: Callable = None,
     extra_vendor: str = "volc",
     extra_model: str = "deepseek-v3.2",
+    force_extra_llm: bool = False,
     embedding_func: Callable = None,
     tfidf_top_n: int = 5,
     embedding_top_n: int = 5,
@@ -857,6 +1115,7 @@ def run_mapreduce_inference_file(
     enable_edge_cases: bool = True,
     enable_qa_direct: bool = True,
     question_column: str = "question",
+    reduce_batch_size: int = 3,
 ) -> str:
     """
     文件便捷入口：读取测试集（CSV/Excel），执行推理，输出结果文件。
@@ -947,6 +1206,7 @@ def run_mapreduce_inference_file(
         extra_llm_func=extra_llm_func,
         extra_vendor=extra_vendor,
         extra_model=extra_model,
+        force_extra_llm=force_extra_llm,
         embedding_func=embedding_func,
         tfidf_top_n=tfidf_top_n,
         embedding_top_n=embedding_top_n,
@@ -956,6 +1216,7 @@ def run_mapreduce_inference_file(
         enable_qa_direct=enable_qa_direct,
         pre_built_retrievers=retrievers,
         on_question_done=_on_question_done,
+        reduce_batch_size=reduce_batch_size,
     )
 
     df = _append_results_to_df(df, results)

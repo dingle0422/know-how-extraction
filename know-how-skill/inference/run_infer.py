@@ -19,6 +19,7 @@
       --embedding-top-n 5 \\
       --edge-cases-top-n 3 \\
       --max-workers 8 \\
+      --parallel-reduce-batch 3 \\
       --question-column question
 """
 
@@ -103,11 +104,11 @@ def main():
         help="Dense Embedding 检索 Top-N（默认: 5）",
     )
     parser.add_argument(
-        "--max-workers", type=int, default=4,
-        help="单题内 Map/Phase3 并发线程数（默认: 4）",
+        "--max-workers", type=int, default=8,
+        help="单题内 Map/Phase3 并发线程数（默认:8）",
     )
     parser.add_argument(
-        "--question-workers", type=int, default=1,
+        "--question-workers", type=int, default=8,
         help="问题级别并发数（默认: 1 即串行；设为 2~4 可同时处理多道题，"
              "总并发 ≈ question-workers × max-workers，请根据 API 并发上限设置）",
     )
@@ -120,10 +121,18 @@ def main():
         help="禁用 QA 直检并行路径（默认开启）",
     )
     parser.add_argument(
-        "--no-extra-llm", action="store_true",
-        help="禁用 Reduce 阶段额外 LLM 裸考推理（默认开启）",
+        "--force-extra-llm", action="store_true",
+        help="强制将 LLM 裸考结果纳入 Reduce 融合（默认仅在无其他有效匹配时才使用裸考结果）",
+    )
+    parser.add_argument(
+        "--parallel-reduce-batch", type=int, default=3,
+        help="分层 Reduce 批次大小（必须为奇数，默认: 3）。Map 结果达到此水位线时立即提交 Layer 1 Reduce",
     )
     args = parser.parse_args()
+
+    # 校验 reduce batch size 必须为奇数
+    if args.parallel_reduce_batch % 2 == 0:
+        parser.error("--parallel-reduce-batch 必须为奇数（如 3, 5, 7）")
 
     # ── 路径解析 ──
     input_path = _resolve_input_path(args.input)
@@ -168,7 +177,7 @@ def main():
     except Exception as e:
         print(f"[Init] Dense Embedding 不可用（仅使用 TF-IDF）: {e}")
 
-    extra_llm_func = None if args.no_extra_llm else chat
+    extra_llm_func = chat
 
     # ── 执行推理 ──
     print("\n" + "=" * 60)
@@ -201,6 +210,8 @@ def main():
         enable_edge_cases=enable_edge,
         enable_qa_direct=enable_qa_direct,
         question_column=args.question_column,
+        force_extra_llm=args.force_extra_llm,
+        reduce_batch_size=args.parallel_reduce_batch,
     )
 
     print("\n" + "=" * 60)

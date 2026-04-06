@@ -3,6 +3,10 @@ Know-How 结构化补丁引擎
 ======================
 接收 LLM 输出的 operations 数组，按顺序对 know-how JSON 执行原子操作。
 无效操作不中断流程，跳过并记录警告日志。
+
+双重溯源机制：
+- KH 级别的 source_qa_ids / edge_qa_ids 数组（由 level2_refine 维护）
+- 元素级别的 inline footnote [1,2,3]（由本模块在 patch 时追加，方便用户回溯每个细节源头）
 """
 
 import copy
@@ -10,6 +14,8 @@ import re
 
 _STEP_ID_RE = re.compile(r'^\d+(\.\d+)*$')
 _FOOTNOTE_RE = re.compile(r'\[(\d+(?:,\s*\d+)*)\]\s*$')
+
+_VALID_STEP_FIELDS = {"step", "action", "condition", "constraint", "policy_basis", "outcome"}
 
 
 def _extract_footnotes(text: str) -> list[int]:
@@ -84,7 +90,6 @@ def _tag_affected_element(kh: dict, op: dict, qa_index: int):
     """在受 patch 影响的元素上追加 QA 溯源角标。"""
     op_type = op.get("op", "")
 
-    # ── Steps: 角标打在 outcome 字段末尾 ──
     if op_type in ("add_step", "modify_step"):
         steps = kh.get("steps", [])
         if op_type == "modify_step":
@@ -98,7 +103,6 @@ def _tag_affected_element(kh: dict, op: dict, qa_index: int):
                 "" if oc is None else str(oc), qa_index
             )
 
-    # ── Exceptions: 角标打在 then 字段 ──
     elif op_type == "add_exception":
         exceptions = kh.get("exceptions", [])
         if exceptions and "then" in exceptions[-1]:
@@ -108,17 +112,6 @@ def _tag_affected_element(kh: dict, op: dict, qa_index: int):
         index = op.get("index")
         if isinstance(index, int) and 0 <= index < len(exceptions) and "then" in exceptions[index]:
             exceptions[index]["then"] = append_qa_footnote(exceptions[index]["then"], qa_index)
-
-    # ── Constraints: 角标打在字符串末尾 ──
-    elif op_type == "add_constraint":
-        constraints = kh.get("constraints", [])
-        if constraints:
-            constraints[-1] = append_qa_footnote(constraints[-1], qa_index)
-    elif op_type == "modify_constraint":
-        constraints = kh.get("constraints", [])
-        index = op.get("index")
-        if isinstance(index, int) and 0 <= index < len(constraints):
-            constraints[index] = append_qa_footnote(constraints[index], qa_index)
 
 
 class _PatchSkip(Exception):
@@ -180,44 +173,18 @@ def _op_modify_step(kh: dict, op: dict) -> str:
     if idx < 0:
         raise _PatchSkip(f"target step '{target}' 不存在")
 
-    footnotes_on_action_before = _extract_footnotes(
-        str(steps[idx].get("action", ""))
-    )
-
     changed_fields = []
     for field, value in updates.items():
-        if field in ("step", "action", "condition", "outcome"):
-            if field == "action":
-                value = _strip_footnotes(str(value))
-            elif field == "outcome":
-                old_footnotes = _extract_footnotes(
-                    str(steps[idx].get("outcome") or "")
-                )
+        if field in _VALID_STEP_FIELDS:
+            if field == "outcome":
+                old_footnotes = _extract_footnotes(str(steps[idx].get("outcome") or ""))
                 new_base = _strip_footnotes(str(value))
-                if old_footnotes:
-                    value = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
-                else:
-                    value = new_base
+                value = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]" if old_footnotes else new_base
             steps[idx][field] = value
             changed_fields.append(field)
 
     if not changed_fields:
         raise _PatchSkip("updates 中无合法字段")
-
-    if "action" in changed_fields and footnotes_on_action_before:
-        oc = str(steps[idx].get("outcome") or "")
-        for n in footnotes_on_action_before:
-            oc = append_qa_footnote(oc, n)
-        steps[idx]["outcome"] = oc
-
-    act = str(steps[idx].get("action", ""))
-    fa = _extract_footnotes(act)
-    if fa:
-        steps[idx]["action"] = _strip_footnotes(act)
-        oc = str(steps[idx].get("outcome") or "")
-        for n in fa:
-            oc = append_qa_footnote(oc, n)
-        steps[idx]["outcome"] = oc
 
     return f"修改 step {target}: {', '.join(changed_fields)}"
 
@@ -267,10 +234,7 @@ def _op_modify_exception(kh: dict, op: dict) -> str:
             if field == "then":
                 old_footnotes = _extract_footnotes(exceptions[index].get("then", ""))
                 new_base = _strip_footnotes(str(updates[field]))
-                if old_footnotes:
-                    exceptions[index][field] = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
-                else:
-                    exceptions[index][field] = new_base
+                exceptions[index][field] = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]" if old_footnotes else new_base
             else:
                 exceptions[index][field] = updates[field]
             changed.append(field)
@@ -285,40 +249,6 @@ def _op_remove_exception(kh: dict, op: dict) -> str:
     _check_list_index(exceptions, index, "exceptions")
     removed = exceptions.pop(index)
     return f"删除 exception[{index}]: when={removed.get('when', '?')}"
-
-
-# ─── Constraints 操作 ─────────────────────────────────────────────────────────
-
-def _op_add_constraint(kh: dict, op: dict) -> str:
-    constraint = op.get("constraint")
-    if not constraint or not isinstance(constraint, str):
-        raise _PatchSkip("constraint 缺失或非字符串")
-    kh.setdefault("constraints", []).append(constraint)
-    return f"追加 constraint: {constraint[:60]}"
-
-
-def _op_modify_constraint(kh: dict, op: dict) -> str:
-    constraints = kh.get("constraints", [])
-    index = op.get("index")
-    new_value = op.get("new_value")
-    _check_list_index(constraints, index, "constraints")
-    if not new_value or not isinstance(new_value, str):
-        raise _PatchSkip("new_value 缺失或非字符串")
-    old_footnotes = _extract_footnotes(constraints[index])
-    new_base = _strip_footnotes(new_value)
-    if old_footnotes:
-        constraints[index] = f"{new_base}[{','.join(str(x) for x in old_footnotes)}]"
-    else:
-        constraints[index] = new_base
-    return f"修改 constraint[{index}]"
-
-
-def _op_remove_constraint(kh: dict, op: dict) -> str:
-    constraints = kh.get("constraints", [])
-    index = op.get("index")
-    _check_list_index(constraints, index, "constraints")
-    removed = constraints.pop(index)
-    return f"删除 constraint[{index}]: {removed[:60]}"
 
 
 # ─── 顶层字段操作 ─────────────────────────────────────────────────────────────
@@ -350,9 +280,6 @@ _OP_DISPATCH = {
     "add_exception":      _op_add_exception,
     "modify_exception":   _op_modify_exception,
     "remove_exception":   _op_remove_exception,
-    "add_constraint":     _op_add_constraint,
-    "modify_constraint":  _op_modify_constraint,
-    "remove_constraint":  _op_remove_constraint,
     "update_scope":       _op_update_scope,
     "update_title":       _op_update_title,
 }

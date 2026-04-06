@@ -21,6 +21,47 @@ sys.path.insert(0, os.path.join(_PACKAGE_DIR, "v_1"))
 _SUPPORTED_QA_EXTS = {".csv", ".xlsx", ".xls"}
 
 
+def _write_kh_markdown(f, kh: dict, heading_level: int = 2, write_title: bool = True):
+    """将单个结构化 KH 写入 Markdown 文件句柄。"""
+    if write_title:
+        prefix = "#" * heading_level
+        f.write(f"{prefix} {kh.get('title', 'Untitled')}\n\n")
+    scope = kh.get("scope", "")
+    if scope:
+        f.write(f"**适用场景**: {scope}\n\n")
+    source_ids = kh.get("source_qa_ids", [])
+    edge_ids = kh.get("edge_qa_ids", [])
+    if source_ids:
+        f.write(f"**Source QA**: {source_ids}\n\n")
+    if edge_ids:
+        f.write(f"**Edge QA**: {edge_ids}\n\n")
+    steps = kh.get("steps", [])
+    if steps:
+        f.write("**操作步骤**:\n")
+        for s in steps:
+            step_id = s.get("step", "?")
+            depth = step_id.count(".") if isinstance(step_id, str) else 0
+            indent = "  " * (depth + 1)
+            line = f"{step_id}. {s.get('action', '')}"
+            if s.get("condition"):
+                line += f" （条件: {s['condition']}）"
+            if s.get("constraint"):
+                line += f" 【约束: {s['constraint']}】"
+            if s.get("policy_basis"):
+                line += f" 【依据: {s['policy_basis']}】"
+            if s.get("outcome"):
+                line += f" → {s['outcome']}"
+            f.write(f"{indent}{line}\n")
+        f.write("\n")
+    exceptions = kh.get("exceptions", [])
+    if exceptions:
+        f.write("**例外情况**:\n")
+        for ex in exceptions:
+            f.write(f"  - 当 {ex.get('when', '?')} → {ex.get('then', '?')}\n")
+        f.write("\n")
+    f.write("---\n\n")
+
+
 def run_full_pipeline_for_qa_v2(
     source_file: str,
     llm_func,
@@ -182,38 +223,11 @@ def run_full_pipeline_for_qa_v2(
             kh = v.get("know_how", {})
             if not kh or v.get("status") != "success":
                 continue
-            title = kh.get("title", "Untitled")
-            scope = kh.get("scope", "")
-            f.write(f"## {title}\n\n")
-            if scope:
-                f.write(f"**适用场景**: {scope}\n\n")
-            steps = kh.get("steps", [])
-            if steps:
-                f.write("**操作步骤**:\n")
-                for s in steps:
-                    step_id = s.get("step", "?")
-                    depth = step_id.count(".") if isinstance(step_id, str) else 0
-                    indent = "  " * (depth + 1)
-                    line = f"{step_id}. {s.get('action', '')}"
-                    if s.get("condition"):
-                        line += f" （条件: {s['condition']}）"
-                    if s.get("outcome"):
-                        line += f" → {s['outcome']}"
-                    f.write(f"{indent}{line}\n")
-                f.write("\n")
-            exceptions = kh.get("exceptions", [])
-            if exceptions:
-                f.write("**例外情况**:\n")
-                for ex in exceptions:
-                    f.write(f"  - 当 {ex.get('when', '?')} → {ex.get('then', '?')}\n")
-                f.write("\n")
-            constraints = kh.get("constraints", [])
-            if constraints:
-                f.write("**约束/依据**:\n")
-                for c in constraints:
-                    f.write(f"  - {c}\n")
-                f.write("\n")
-            f.write("---\n\n")
+            _write_kh_markdown(f, kh, heading_level=2)
+            edge_khs = v.get("edge_know_hows", [])
+            for i, ekh in enumerate(edge_khs):
+                f.write(f"### [边缘KH-{i+1}] {ekh.get('title', 'Untitled')}\n\n")
+                _write_kh_markdown(f, ekh, heading_level=4, write_title=False)
     print(f"  Markdown 预览已导出: {md_file}")
 
     # ── 发布到 knowledge 目录 ─────────────────────────────────────────────
@@ -249,6 +263,7 @@ def run_full_pipeline_for_qa_v2(
             knowledge_json_path=_knowledge_json,
             knowledge_dir=knowledge_sub,
             embedding_func=_emb_func,
+            llm_func=llm_func,
         )
 
     # 复制案例库到 knowledge 目录
@@ -285,11 +300,11 @@ if __name__ == "__main__":
         help="聚类 cosine 相似度阈值 (默认 0.60)",
     )
     parser.add_argument(
-        "--level1-workers", type=int, default=os.cpu_count() or 4,
+        "--level1-workers", type=int, default=os.cpu_count() or 8,
         help="Level 1 并发线程数",
     )
     parser.add_argument(
-        "--level2-workers", type=int, default=4,
+        "--level2-workers", type=int, default=8,
         help="Level 2 簇间并发线程数",
     )
     parser.add_argument(
@@ -309,16 +324,16 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--tfidf-weight", type=float, default=1.0,
+        "--tfidf-weight", type=float, default=0.5,
         help="聚类时 TF-IDF 相似度权重 (默认 1.0，设为 0 跳过 TF-IDF)",
     )
     parser.add_argument(
-        "--embedding-weight", type=float, default=0.0,
+        "--embedding-weight", type=float, default=0.5,
         help="聚类时 Dense Embedding 相似度权重 (默认 0.0，设为 0 跳过 Embedding)",
     )
     parser.add_argument(
-        "--max-cluster-samples", type=int, default=20,
-        help="每个聚类簇的最大样本数，超出部分按相似度倒排拆分为新簇 (默认 20，设为 0 不限制)",
+        "--max-cluster-samples", type=int, default=5,
+        help="每个聚类簇的最大样本数，超出部分按相似度倒排拆分为新簇 (默认 5，设为 0 不限制)",
     )
     parser.add_argument(
         "--no-group-by-extra", dest="group_by_extra",
