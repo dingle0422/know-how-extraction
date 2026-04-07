@@ -86,7 +86,7 @@ def chat(messages: str, vendor: str = "aliyun", model: str = "deepseek-v3.2") ->
         "stream": False,
         "top_p": 0.7,
         "temperature": 0.5,
-        "enable_thinking": True,
+        # "enable_thinking": True,
         # "enable_search":True
     }
     response = requests.post(URL, data=json.dumps(PAYLOAD), headers=HEADERS).json()
