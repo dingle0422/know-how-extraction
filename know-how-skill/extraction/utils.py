@@ -77,7 +77,7 @@ def publish_to_knowledge(
 
     md_path = os.path.join(sub_dir, "knowledge.md")
     print("[Knowledge] 正在生成 knowledge.md（目录索引 + 全文内容）...")
-    write_knowhow_md_with_toc(dst_json, md_path)
+    write_knowhow_md_with_toc(dst_json, md_path, llm_func=llm_func)
 
     return sub_dir
 
@@ -134,7 +134,11 @@ def _extract_title_from_text(text: str) -> str:
     return "未命名"
 
 
-def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
+def write_knowhow_md_with_toc(
+    knowledge_json_path: str,
+    knowledge_md_path: str,
+    llm_func=None,
+):
     """
     读取 knowledge.json，生成带目录索引的 knowledge.md。
 
@@ -142,6 +146,9 @@ def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
       1. Know-How 目录（标题 + 对应行号）
       2. Know-How 全文内容
       3. 统计信息
+
+    当提供 llm_func 且知识条目数超过阈值时，使用 LLM 生成多级分类目录；
+    否则回退到扁平编号目录。
 
     自动检测两种格式：
       - QA v2 结构化格式: know_how (dict with title/steps/...)
@@ -208,14 +215,46 @@ def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
     )
 
     # ── 构建目录区 ────────────────────────────────────────────────────────
-    toc_header = ["# Know-How 知识目录", ""]
-    toc_footer = ["", "---", ""]
-    toc_line_count = len(toc_header) + len(kh_blocks) + len(toc_footer)
+    titles = [t for t, _ in kh_blocks]
+    use_hierarchical = (
+        llm_func is not None
+        and len(kh_blocks) >= _HIERARCHICAL_TOC_THRESHOLD
+    )
 
-    toc_entries = []
-    for i, (title, offset_in_content) in enumerate(title_offsets):
-        actual_line = toc_line_count + offset_in_content + 1
-        toc_entries.append(f"{i + 1}. {title}  (行 {actual_line})")
+    if use_hierarchical:
+        print(f"[Knowledge] 知识条目 {len(kh_blocks)} 条，启用 LLM 多级目录分类...")
+        categories = _generate_hierarchical_toc(titles, llm_func)
+    else:
+        categories = None
+
+    if categories is not None:
+        toc_header = ["# Know-How 知识目录（多级分类）", ""]
+        toc_footer = ["", "---", ""]
+
+        # 先预估目录区行数以计算正确的行号引用
+        # 两遍渲染: 第一遍用占位行号确定行数，第二遍用实际行号
+        dummy_line_map = {i: 0 for i in range(len(titles))}
+        dummy_toc = _render_hierarchical_toc(categories, titles, dummy_line_map)
+        toc_line_count = len(toc_header) + len(dummy_toc) + len(toc_footer)
+
+        title_line_map = {}
+        for i, (_title, offset_in_content) in enumerate(title_offsets):
+            title_line_map[i] = toc_line_count + offset_in_content + 1
+
+        toc_entries = _render_hierarchical_toc(categories, titles, title_line_map)
+        print(f"[Knowledge] 多级目录已生成: "
+              f"{len(categories)} 个一级分类")
+    else:
+        if use_hierarchical:
+            print("[Knowledge] LLM 多级目录生成失败，回退扁平目录")
+        toc_header = ["# Know-How 知识目录", ""]
+        toc_footer = ["", "---", ""]
+        toc_line_count = len(toc_header) + len(kh_blocks) + len(toc_footer)
+
+        toc_entries = []
+        for i, (title, offset_in_content) in enumerate(title_offsets):
+            actual_line = toc_line_count + offset_in_content + 1
+            toc_entries.append(f"{i + 1}. {title}  (行 {actual_line})")
 
     # ── 组装并写入文件 ────────────────────────────────────────────────────
     all_lines = toc_header + toc_entries + toc_footer + content_lines
@@ -224,10 +263,140 @@ def write_knowhow_md_with_toc(knowledge_json_path: str, knowledge_md_path: str):
         f.write("\n".join(all_lines))
         f.write("\n")
 
+    toc_type = "多级分类" if categories is not None else "扁平"
     print(
         f"[Knowledge] knowledge.md 已生成: {knowledge_md_path} "
-        f"({len(kh_blocks)} 条, {total_chars:,} 字)"
+        f"({len(kh_blocks)} 条, {total_chars:,} 字, {toc_type}目录)"
     )
+
+
+# ─── 多级目录 LLM 分类 ────────────────────────────────────────────────────
+
+_HIERARCHICAL_TOC_PROMPT = """\
+你是一个知识体系架构师。下面有 {count} 条知识块标题，请将它们组织为**两级分类目录**，方便用户层层检索。
+
+# 输入标题列表
+{titles_text}
+
+# 分类要求
+1. **一级分类**：按业务领域/主题大类划分（通常 5~15 个大类），名称简洁有概括性（如"增值税免税政策""进项税额抵扣""会计处理"等）。
+2. **二级分类**：在每个一级分类下，按更细粒度的子主题/场景进一步分组（每个一级下通常 2~8 个二级），如果某一级分类下条目数 ≤ 5，可以不设二级，直接放条目。
+3. 每条知识块只能归入**一个**二级分类（不可重复归类）。
+4. 所有输入标题都必须被归类，不得遗漏。
+5. 分类名称应尽量短小精炼（≤15字），体现该类的核心主题。
+
+# 输出格式
+严格输出合法 JSON（不要用 ```json 包裹），结构如下：
+{{
+  "categories": [
+    {{
+      "name": "一级分类名称",
+      "subcategories": [
+        {{
+          "name": "二级分类名称",
+          "items": [0, 3, 5]
+        }}
+      ]
+    }},
+    {{
+      "name": "另一个一级分类（条目少时可无二级子分类）",
+      "subcategories": [
+        {{
+          "name": "",
+          "items": [10, 11]
+        }}
+      ]
+    }}
+  ]
+}}
+
+说明：
+- items 数组中是标题前面的序号（0-based）。
+- 当某一级分类不需要二级子分类时，subcategories 中放一个 name 为空字符串的项，items 包含该类全部条目序号。
+- categories 数组按逻辑顺序排列（如先税种政策、再操作流程、再会计处理等）。"""
+
+
+_HIERARCHICAL_TOC_THRESHOLD = 20
+
+
+def _generate_hierarchical_toc(
+    titles: list[str],
+    llm_func,
+    max_retries: int = 3,
+) -> list[dict] | None:
+    """调用 LLM 将扁平标题列表组织为多级分类结构。
+
+    返回格式: [{"name": "...", "subcategories": [{"name": "...", "items": [idx, ...]}]}]
+    失败时返回 None，调用方回退到扁平目录。
+    """
+    titles_text = "\n".join(f"{i}. {t}" for i, t in enumerate(titles))
+    prompt = _HIERARCHICAL_TOC_PROMPT.format(count=len(titles), titles_text=titles_text)
+
+    for attempt in range(max_retries):
+        try:
+            raw = llm_func(prompt)["content"]
+            raw = raw.strip()
+            if raw.startswith("```json"):
+                raw = raw[7:]
+            elif raw.startswith("```"):
+                raw = raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+            result = json.loads(raw)
+            categories = result.get("categories", [])
+            if not categories:
+                continue
+
+            seen = set()
+            for cat in categories:
+                for sub in cat.get("subcategories", []):
+                    for idx in sub.get("items", []):
+                        seen.add(idx)
+
+            if len(seen) < len(titles) * 0.9:
+                print(f"    [TOC] 第 {attempt+1} 次尝试覆盖率不足 "
+                      f"({len(seen)}/{len(titles)})，重试...")
+                continue
+
+            return categories
+        except Exception as e:
+            print(f"    [TOC] 第 {attempt+1} 次尝试失败: {e}")
+
+    return None
+
+
+def _render_hierarchical_toc(
+    categories: list[dict],
+    titles: list[str],
+    title_line_map: dict[int, int],
+) -> list[str]:
+    """将 LLM 返回的分类结构渲染为多级 Markdown 目录行。
+
+    Parameters
+    ----------
+    categories     : LLM 返回的分类树
+    titles         : 知识块标题列表
+    title_line_map : {知识块序号: 实际行号} 映射
+    """
+    lines = []
+    for ci, cat in enumerate(categories, 1):
+        lines.append(f"## {ci}. {cat['name']}")
+        lines.append("")
+        subcats = cat.get("subcategories", [])
+        for si, sub in enumerate(subcats, 1):
+            sub_name = sub.get("name", "")
+            items = sub.get("items", [])
+            if sub_name:
+                lines.append(f"### {ci}.{si} {sub_name}")
+                lines.append("")
+            for idx in items:
+                if 0 <= idx < len(titles):
+                    line_no = title_line_map.get(idx, "?")
+                    lines.append(f"- {titles[idx]}  (行 {line_no})")
+            lines.append("")
+    return lines
 
 
 # ─── 检索关键词生成 ────────────────────────────────────────────────────────

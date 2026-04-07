@@ -243,6 +243,7 @@ def run_full_pipeline_for_qa_v2(
             final_json_path=level2_file,
             knowledge_base_dir=knowledge_dir,
             level1_json_path=level1_file,
+            llm_func=llm_func,
         )
 
     # ── 构建检索索引 ─────────────────────────────────────────────────
