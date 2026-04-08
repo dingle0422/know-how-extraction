@@ -84,10 +84,13 @@ def publish_to_knowledge(
 
 # ─── Know-How 内容追加到 knowledge.md ─────────────────────────────────────────
 
-def _render_structured_kh(kh: dict) -> str:
+def _render_structured_kh(kh: dict, cluster_index=None) -> str:
     """将 QA v2 的结构化 JSON know-how 渲染为可读文本。"""
     lines = []
-    lines.append(f"### {kh.get('title', '未命名')}")
+    title = kh.get('title', '未命名')
+    if cluster_index is not None:
+        title = f"[{cluster_index}] {title}"
+    lines.append(f"### {title}")
     if kh.get("scope"):
         lines.append(f"**适用场景**: {kh['scope']}")
     lines.append("")
@@ -168,14 +171,19 @@ def write_knowhow_md_with_toc(
             continue
 
         if "know_how" in entry and isinstance(entry["know_how"], dict):
-            rendered = _render_structured_kh(entry["know_how"])
+            cluster_idx = entry.get("cluster_index")
+            rendered = _render_structured_kh(entry["know_how"], cluster_index=cluster_idx)
             title = entry["know_how"].get("title", "未命名")
+            if cluster_idx is not None:
+                title = f"[{cluster_idx}] {title}"
             if rendered.strip():
                 kh_blocks.append((title, rendered))
             for ekh in entry.get("edge_know_hows", []):
                 if isinstance(ekh, dict):
-                    e_rendered = _render_structured_kh(ekh)
+                    e_rendered = _render_structured_kh(ekh, cluster_index=cluster_idx)
                     e_title = ekh.get("title", "未命名")
+                    if cluster_idx is not None:
+                        e_title = f"[{cluster_idx}] {e_title}"
                     if e_rendered.strip():
                         kh_blocks.append((e_title, e_rendered))
 

@@ -182,6 +182,7 @@ def _run_edge_kh_infer(
         "edge_kh_index": task_input.get("edge_kh_index"),
         "edge_kh_title": task_input.get("edge_kh_title", ""),
         "edge_kh_source_qa_ids": task_input.get("edge_kh_source_qa_ids", []),
+        "kh_text": kh_text,
     }
 
     try:
@@ -279,16 +280,11 @@ def _format_reduce_item(item: dict) -> str:
         if item.get("dissenting_view"):
             text += f"\n少数派观点: {item['dissenting_view']}"
         return text
-    source_tag = "知识块"
-    if item.get("is_llm_bare"):
-        source_tag = "LLM裸考"
-    elif item.get("is_qa_direct"):
-        source_tag = "QA直检"
-    elif item.get("is_edge_case_fallback"):
-        source_tag = "边缘案例兜底"
+    kh_text = item.get("kh_text") or item.get("qa_text") or ""
+    if item.get("is_llm_bare") or not kh_text:
+        return f"候选答案: {item.get('Derived_Answer', '')}"
     return (
-        f"来源: {source_tag} [{item.get('kh_source_id', '?')}]\n"
-        f"推导逻辑: {item.get('Reasoning_Chain', '')}\n"
+        f"知识块: {kh_text}\n"
         f"候选答案: {item.get('Derived_Answer', '')}"
     )
 
